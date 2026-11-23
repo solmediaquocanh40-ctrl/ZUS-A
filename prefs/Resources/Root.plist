@@ -147,6 +147,20 @@
 			<string>Nút cài đặt trong Zalo</string>
 		</dict>
 		<dict>
+			<key>PostNotification</key>
+			<string>com.anhdang.zalounseen/prefsChanged</string>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.anhdang.zalounseen</string>
+			<key>key</key>
+			<string>longPressTab</string>
+			<key>label</key>
+			<string>Ấn giữ thanh tab mở bảng ZUS</string>
+		</dict>
+		<dict>
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
@@ -180,7 +194,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>ZUS 1.1.0 • com.anhdang.zalounseen</string>
+			<string>ZUS 1.1.1 • com.anhdang.zalounseen</string>
 		</dict>
 	</array>
 	<key>title</key>

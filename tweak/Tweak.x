@@ -1,4 +1,4 @@
-// ZUS 1.1.0 — đọc tin nhắn Zalo mà bên kia không thấy "đã xem", tắt "đang nhập...".
+// ZUS 1.1.1 — đọc tin nhắn Zalo mà bên kia không thấy "đã xem", tắt "đang nhập...".
 //
 // SỬA GỐC VỤ VĂNG CỦA 1.0.4 (đã chứng minh ở mức lệnh máy từ file .ips và đúng
 // file .deb đã cài): hàm thay thế chung ZUSGenericHook khai tham số kiểu `id`,
@@ -112,6 +112,7 @@ static BOOL gHideDelivered = YES; // 1.1.0: mặc định BẬT = đúng hành v
 static BOOL gAntiRecall = YES;
 static BOOL gKeepAwake = NO;
 static BOOL gInAppUI = YES;
+static BOOL gLongPressTab = YES; // 1.1.1: ấn giữ thanh tab mở bảng ZUS
 static BOOL gStoryDownload = NO;
 static BOOL gPrivacyShield = NO;
 static BOOL gPrefsSeen = NO;
@@ -139,6 +140,7 @@ static void ZUSLoadPrefs(void) {
     gAntiRecall = ZUSReadBool(ZUS_KEY_ANTIRECALL, YES);
     gKeepAwake = ZUSReadBool(ZUS_KEY_AWAKE, NO);
     gInAppUI = ZUSReadBool(ZUS_KEY_INAPP, YES);
+    gLongPressTab = ZUSReadBool(ZUS_KEY_LONGTAB, YES);
     gStoryDownload = ZUSReadBool(ZUS_KEY_STORYDL, NO);
     gPrivacyShield = ZUSReadBool(ZUS_KEY_SHIELD, NO);
     if (gPrefsSeen && (oEnabled != gEnabled || oUnseen != gUnseen || oTyping != gHideTyping || oDeliv != gHideDelivered || oRecall != gAntiRecall))
@@ -702,27 +704,68 @@ static NSDictionary *ZUSFriendDict(id f) {
     return @{@"name": name, @"id": fid, @"phone": phone, @"avatar": avatar};
 }
 
+static NSArray *ZUSFriendsFromManager(id inst, NSString *srcName) {
+    if (!inst) return nil;
+    NSArray *listSels = @[@"cloneFriendList", @"friendList", @"allFriends", @"friends", @"getFriendList", @"getAllFriends", @"listFriends", @"getFriends", @"friendArray", @"allContacts", @"contacts"];
+    for (NSString *sn in listSels) {
+        SEL sel = sel_registerName(sn.UTF8String);
+        if (![inst respondsToSelector:sel]) continue;
+        @try {
+            id r = ((id (*)(id, SEL))objc_msgSend)(inst, sel);
+            NSArray *arr = nil;
+            if ([r isKindOfClass:[NSArray class]]) arr = r;
+            else if ([r isKindOfClass:[NSSet class]]) arr = [(NSSet *)r allObjects];
+            else if ([r isKindOfClass:[NSDictionary class]]) arr = [(NSDictionary *)r allValues];
+            if (arr.count) {
+                ZUSLog(@"danh bạ: lấy được %lu bạn từ %@.%@", (unsigned long)arr.count, srcName, sn);
+                CFPreferencesSetAppValue((__bridge CFStringRef)ZUS_DIAG_FRIENDSRC, (__bridge CFPropertyListRef)[NSString stringWithFormat:@"%@.%@", srcName, sn], (__bridge CFStringRef)ZUS_DOMAIN);
+                CFPreferencesAppSynchronize((__bridge CFStringRef)ZUS_DOMAIN);
+                return arr;
+            }
+            if (r) ZUSLog(@"danh bạ: %@.%@ có tồn tại nhưng trả về %@ (rỗng hoặc chưa sẵn sàng)", srcName, sn, NSStringFromClass([r class]));
+        } @catch (NSException *e) {}
+    }
+    return nil;
+}
+
 static NSArray *ZUSCollectFriends(void) {
+    // Vòng 2 (1.1.1): log của 1.1.0 đã chỉ đúng nguồn — FriendFlowManager có
+    // cloneFriendList (trả thẳng danh sách, đồng bộ) và ChatDataManager giữ
+    // nó qua thuộc tính friendFlowManager. Bám hai đường đó trước tiên.
+    for (NSString *hostName in @[@"ChatDataManager", @"MSDataCoordinator"]) {
+        Class hostCls = objc_getClass(hostName.UTF8String);
+        if (!hostCls) continue;
+        id host = ZUSInstanceOf(hostCls);
+        if (!host) continue;
+        id ffm = nil;
+        @try { ffm = [host valueForKey:@"friendFlowManager"]; } @catch (NSException *e) {}
+        if (!ffm) { @try { ffm = [host valueForKey:@"friendManager"]; } @catch (NSException *e) {} }
+        if (ffm) {
+            NSArray *r = ZUSFriendsFromManager(ffm, [hostName stringByAppendingString:@".friendFlowManager"]);
+            if (r) return r;
+        } else {
+            ZUSLog(@"danh bạ: %@ không lộ friendFlowManager qua KVC", hostName);
+        }
+    }
+    {
+        Class cls = objc_getClass("FriendFlowManager");
+        id inst = cls ? ZUSInstanceOf(cls) : nil;
+        if (inst) {
+            NSArray *r = ZUSFriendsFromManager(inst, @"FriendFlowManager");
+            if (r) return r;
+        } else {
+            ZUSLog(@"danh bạ: không lấy được thực thể FriendFlowManager qua các hàm shared thường gặp");
+        }
+    }
+    // Dự phòng: quét chung các lớp quản lý như vòng 1.
     NSArray *classNames = @[@"FriendDataManager", @"FriendFlowManager", @"FriendRequestManager", @"FriendManager", @"ZAFriendManager", @"MSDataCoordinator", @"ChatDataManager"];
-    NSArray *listSels = @[@"allFriends", @"friends", @"friendList", @"getAllFriends", @"listFriends", @"getFriends", @"friendArray", @"allContacts", @"contacts"];
     for (NSString *cn in classNames) {
         Class cls = objc_getClass(cn.UTF8String);
         if (!cls) continue;
         id inst = ZUSInstanceOf(cls);
         if (!inst) continue;
-        for (NSString *sn in listSels) {
-            SEL sel = sel_registerName(sn.UTF8String);
-            if (![inst respondsToSelector:sel]) continue;
-            @try {
-                id r = ((id (*)(id, SEL))objc_msgSend)(inst, sel);
-                if ([r isKindOfClass:[NSArray class]] && [(NSArray *)r count]) {
-                    ZUSLog(@"danh bạ: lấy được %lu bạn từ %@.%@", (unsigned long)[(NSArray *)r count], cn, sn);
-                    CFPreferencesSetAppValue((__bridge CFStringRef)ZUS_DIAG_FRIENDSRC, (__bridge CFPropertyListRef)[NSString stringWithFormat:@"%@.%@", cn, sn], (__bridge CFStringRef)ZUS_DOMAIN);
-                    CFPreferencesAppSynchronize((__bridge CFStringRef)ZUS_DOMAIN);
-                    return r;
-                }
-            } @catch (NSException *e) {}
-        }
+        NSArray *r = ZUSFriendsFromManager(inst, cn);
+        if (r) return r;
     }
     ZUSLog(@"danh bạ: chưa dò được nguồn bạn bè — bản đồ hàm friend của các lớp ứng viên:");
     for (NSString *cn in classNames) {
@@ -752,6 +795,16 @@ static NSString *ZUSBackupContacts(void) {
     for (id f in raw) {
         NSDictionary *d = ZUSFriendDict(f);
         if ([d[@"id"] length] || [d[@"name"] length]) [friends addObject:d];
+    }
+    if (!friends.count && raw.count) {
+        // Lấy được danh sách nhưng trích trường ra rỗng: ghi lại lớp và
+        // thuộc tính của phần tử đầu để vòng sau chốt đúng tên trường.
+        id f0 = raw[0];
+        NSMutableArray *props = [NSMutableArray array];
+        unsigned pc = 0; objc_property_t *pl = class_copyPropertyList([f0 class], &pc);
+        for (unsigned i = 0; i < pc; i++) [props addObject:@(property_getName(pl[i]))];
+        free(pl);
+        ZUSLog(@"danh bạ: lấy được %lu phần tử (lớp %@) nhưng trích tên/mã đều rỗng — thuộc tính của phần tử: %@", (unsigned long)raw.count, NSStringFromClass([f0 class]), [props componentsJoinedByString:@", "]);
     }
     NSString *docs = ZUSDocsPath();
     NSData *json = [NSJSONSerialization dataWithJSONObject:friends options:NSJSONWritingPrettyPrinted error:nil];
@@ -854,7 +907,7 @@ static NSString *ZUSExportProfile(void) {
     NSMutableDictionary *prof = [NSMutableDictionary dictionary];
     for (NSString *k in ZUSAllPrefKeys()) prof[k] = @(ZUSReadBool(k, NO));
     prof[@"_app"] = @"ZUS";
-    prof[@"_version"] = @"1.1.0";
+    prof[@"_version"] = @"1.1.1";
     NSData *json = [NSJSONSerialization dataWithJSONObject:prof options:NSJSONWritingPrettyPrinted error:nil];
     NSString *path = [ZUSDocsPath() stringByAppendingPathComponent:@"ZUS-Profile.json"];
     return [json writeToFile:path atomically:YES] ? path : nil;
@@ -893,6 +946,7 @@ static NSArray *ZUSSettingRows(void) {
         @[@"Chống thu hồi tin nhắn", ZUS_KEY_ANTIRECALL, @YES],
         @[@"Giữ màn hình sáng khi dùng Zalo", ZUS_KEY_AWAKE, @NO],
         @[@"Nút cài đặt trong Zalo", ZUS_KEY_INAPP, @YES],
+        @[@"Ấn giữ thanh tab mở bảng ZUS", ZUS_KEY_LONGTAB, @YES],
         @[@"Tải Story về máy", ZUS_KEY_STORYDL, @NO],
         @[@"Che nội dung khi thoát ra đa nhiệm", ZUS_KEY_SHIELD, @NO],
         @[@"Ghi log gỡ lỗi", ZUS_KEY_DEBUG, @YES],
@@ -979,7 +1033,7 @@ static id ZUSDiagRead(NSString *key) {
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
-    return section == 2 ? @"ZUS 1.1.0 • Thay đổi ăn ngay, không cần mở lại Zalo." : nil;
+    return section == 2 ? @"ZUS 1.1.1 • Thay đổi ăn ngay, không cần mở lại Zalo." : nil;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -1072,6 +1126,7 @@ static id ZUSDiagRead(NSString *key) {
 
 @interface ZUSInAppHandler : NSObject
 - (void)zu_openSettings:(id)sender;
+- (void)zu_openSettingsFromGesture:(UILongPressGestureRecognizer *)g;
 @end
 
 @implementation ZUSInAppHandler
@@ -1090,11 +1145,35 @@ static id ZUSDiagRead(NSString *key) {
     [vc presentViewController:nav animated:YES completion:nil];
 }
 
+// 1.1.1 (anh chốt): ấn giữ trên thanh tab dưới đáy Zalo cũng mở bảng này.
+// Chỉ chạy ở trạng thái Began (một lần mỗi lần ấn giữ), rung nhẹ xác nhận,
+// và tự nạp lại cài đặt ngay trước khi quyết định — công tắc đã tắt là
+// ấn giữ không làm gì cả.
+- (void)zu_openSettingsFromGesture:(UILongPressGestureRecognizer *)g {
+    if (g.state != UIGestureRecognizerStateBegan) return;
+    ZUSLoadPrefs();
+    if (!gEnabled || !gLongPressTab) return;
+    UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+    [fb impactOccurred];
+    UIResponder *r = (UIResponder *)g.view;
+    UIViewController *vc = nil;
+    while (r) {
+        if ([r isKindOfClass:[UIViewController class]]) { vc = (UIViewController *)r; break; }
+        r = [r nextResponder];
+    }
+    if (!vc) return;
+    while (vc.presentedViewController) vc = vc.presentedViewController;
+    ZUSSettingsController *panel = [[ZUSSettingsController alloc] init];
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:panel];
+    [vc presentViewController:nav animated:YES completion:nil];
+}
+
 @end
 
 static void (*gOrigChatAppear)(__unsafe_unretained id, SEL, BOOL) = NULL;
 static BOOL gInAppInstalled = NO;
 static ZUSInAppHandler *gInAppHandler = nil;
+static void ZUSInstallTabBarGesture(void);
 
 // Điểm bám duy nhất vào giao diện Zalo: viewWillAppear: của lớp màn hình chat.
 // LUÔN chạy bản gốc trước; phần thêm nút bọc try/catch, tắt công tắc thì gỡ nút.
@@ -1102,6 +1181,7 @@ static void ZUSChatViewWillAppear(__unsafe_unretained id self, SEL _cmd, BOOL an
     if (gOrigChatAppear) gOrigChatAppear(self, _cmd, animated);
     ZUSLoadPrefs();
     ZUSApplyAwake();
+    ZUSInstallTabBarGesture();
     @try {
         UIViewController *vc = (UIViewController *)self;
         UIView *v = vc.view;
@@ -1140,6 +1220,60 @@ static void ZUSInstallInAppButton(void) {
 }
 
 // ---------------- Điểm vào ----------------
+
+// ----- Ấn giữ thanh tab mở bảng ZUS (1.1.1, anh chốt thay lối vào chính) -----
+// Không móc hàm nào của Zalo: chỉ gắn UILongPressGestureRecognizer vào
+// UITabBar. Tìm thanh theo hai đường: UITabBarController gốc trước, dự phòng
+// quét cây view của cửa sổ chính (dùng ngăn xếp tường minh, KHÔNG đệ quy
+// bằng block). Không thấy UITabBar (Zalo tự vẽ thanh riêng) thì ghi log cấu
+// trúc cửa sổ để vòng sau bám đúng — tuyệt đối không gắn bừa vào view lạ.
+static BOOL gTabGestureInstalled = NO;
+static void ZUSInstallTabBarGesture(void) {
+    if (gTabGestureInstalled) return;
+    if (!gEnabled || !gLongPressTab) return;
+    @try {
+        UIWindow *win = nil;
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+            for (UIWindow *w in ((UIWindowScene *)scene).windows) if (w.isKeyWindow) { win = w; break; }
+            if (win) break;
+        }
+        if (!win) return; // giao diện chưa lên — lần mở chat / hẹn giờ sau sẽ gắn tiếp
+        UITabBar *tabBar = nil;
+        NSString *how = nil;
+        UIViewController *root = win.rootViewController;
+        if ([root isKindOfClass:[UITabBarController class]]) {
+            tabBar = ((UITabBarController *)root).tabBar;
+            how = @"UITabBarController gốc";
+        }
+        if (!tabBar) {
+            NSMutableArray *stack = [NSMutableArray arrayWithObject:win];
+            while (stack.count) {
+                UIView *v = stack.lastObject;
+                [stack removeLastObject];
+                if ([v isKindOfClass:[UITabBar class]]) { tabBar = (UITabBar *)v; how = @"quét cây view"; break; }
+                for (UIView *sub in v.subviews) [stack addObject:sub];
+            }
+        }
+        if (!tabBar) {
+            NSMutableArray *names = [NSMutableArray array];
+            if (root.view) for (UIView *sub in root.view.subviews)
+                [names addObject:[NSString stringWithFormat:@"%@(y=%.0f,h=%.0f)", NSStringFromClass([sub class]), sub.frame.origin.y, sub.frame.size.height]];
+            ZUSLog(@"ấn-giữ tab: chưa thấy UITabBar (gốc=%@) — các view con của view gốc: %@", NSStringFromClass([root class]), [names componentsJoinedByString:@", "]);
+            return;
+        }
+        if (!gInAppHandler) gInAppHandler = [[ZUSInAppHandler alloc] init];
+        UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:gInAppHandler action:@selector(zu_openSettingsFromGesture:)];
+        lp.minimumPressDuration = 0.5;
+        lp.cancelsTouchesInView = YES; // ấn giữ ăn luôn cái chạm — không nhảy tab
+        [tabBar addGestureRecognizer:lp];
+        gTabGestureInstalled = YES;
+        ZUSLog(@"đã gắn ấn-giữ mở bảng ZUS vào thanh tab (%@, lớp %@)", how, NSStringFromClass([tabBar class]));
+    } @catch (NSException *e) {
+        ZUSLog(@"lỗi khi gắn ấn-giữ thanh tab: %@", e.name);
+    }
+}
+
 %ctor {
     @autoreleasepool {
         gOrigs = [[NSMutableDictionary alloc] init];
@@ -1155,7 +1289,7 @@ static void ZUSInstallInAppButton(void) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, ZUSPrefsChanged,
                                         ZUS_NOTIFY, NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         ZUSInstallShieldObservers();
-        ZUSLog(@"ZUS 1.1.0 nạp vào Zalo (bật=%d, unseen=%d, ẩn đang nhập=%d)", gEnabled, gUnseen, gHideTyping);
+        ZUSLog(@"ZUS 1.1.1 nạp vào Zalo (bật=%d, unseen=%d, ẩn đang nhập=%d)", gEnabled, gUnseen, gHideTyping);
         ZUSCheckZaloVersion();
         // Mốc "đã nạp" ghi thẳng vào kho prefs ngay khi ctor chạy (thêm ở 1.0.1):
         // bằng chứng tweak có chạy trong Zalo hay không, đọc được ở trang Cài đặt
@@ -1171,7 +1305,8 @@ static void ZUSInstallInAppButton(void) {
             ZUSInstallWhitelist();
             ZUSInstallInAppButton();
             ZUSInstallStoryDownload();
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(7 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ ZUSInstallWhitelist(); });
+            ZUSInstallTabBarGesture();
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(7 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ ZUSInstallWhitelist(); ZUSInstallTabBarGesture(); });
         });
     }
 }

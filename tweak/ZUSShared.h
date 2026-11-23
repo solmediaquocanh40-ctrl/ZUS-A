@@ -17,6 +17,7 @@
 #define ZUS_KEY_ANTIRECALL @"antiRecall"
 #define ZUS_KEY_AWAKE     @"keepAwake"
 #define ZUS_KEY_INAPP     @"inAppUI"
+#define ZUS_KEY_LONGTAB   @"longPressTab"
 #define ZUS_KEY_STORYDL   @"storyDownload"
 #define ZUS_KEY_SHIELD    @"privacyShield"
 #define ZUS_KEY_ZALOVER   @"lastZaloVersion"
