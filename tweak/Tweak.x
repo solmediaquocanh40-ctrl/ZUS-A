@@ -368,7 +368,12 @@ static long long ZUSGenericHook(__unsafe_unretained id self, SEL _cmd, __unsafe_
     void *orig = NULL; int cat = 0; NSString *key = nil;
     ZUSFindOrigCat(self, _cmd, &orig, &cat, &key);
     ZUSNoteCalledOnce(self, _cmd, key);
-    BOOL active = (cat == 3) ? ZUSActiveDelivered(((uintptr_t)a2 & 0xFF) != 0) : ZUSActiveForCat(cat);
+    // Cờ isSeen nằm ở byte thấp của thanh ghi tham số thứ hai. PHẢI vòng qua
+    // void* trước khi ép sang số nguyên: bít-mặt-nạ trực tiếp trên con trỏ id
+    // là lỗi cứng -Wdeprecated-objc-pointer-introspection trên SDK mới nhất
+    // (build đầu của ZUS 1.1.0 chết đúng dòng này).
+    void *a2Raw = (void *)a2;
+    BOOL active = (cat == 3) ? ZUSActiveDelivered(((uintptr_t)a2Raw & 0xFF) != 0) : ZUSActiveForCat(cat);
     if (active) { ZUSNoteBlocked(self, _cmd, cat); return 0; }
     if (orig) return ((long long (*)(__unsafe_unretained id, SEL, __unsafe_unretained id, __unsafe_unretained id))orig)(self, _cmd, a1, a2);
     return 0;
