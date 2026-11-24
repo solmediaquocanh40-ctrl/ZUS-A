@@ -1,4 +1,4 @@
-// ZUS 1.1.8 — đọc tin nhắn Zalo mà bên kia không thấy "đã xem", tắt "đang nhập...".
+// ZUS 1.1.9 — đọc tin nhắn Zalo mà bên kia không thấy "đã xem", tắt "đang nhập...".
 //
 // SỬA GỐC VỤ VĂNG CỦA 1.0.4 (đã chứng minh ở mức lệnh máy từ file .ips và đúng
 // file .deb đã cài): hàm thay thế chung ZUSGenericHook khai tham số kiểu `id`,
@@ -1388,7 +1388,7 @@ static NSString *ZUSExportProfile(void) {
     NSMutableDictionary *prof = [NSMutableDictionary dictionary];
     for (NSString *k in ZUSAllPrefKeys()) prof[k] = @(ZUSReadBool(k, NO));
     prof[@"_app"] = @"ZUS";
-    prof[@"_version"] = @"1.1.8";
+    prof[@"_version"] = @"1.1.9";
     NSData *json = [NSJSONSerialization dataWithJSONObject:prof options:NSJSONWritingPrettyPrinted error:nil];
     NSString *path = [ZUSDocsPath() stringByAppendingPathComponent:@"ZUS-Profile.json"];
     return [json writeToFile:path atomically:YES] ? path : nil;
@@ -1720,7 +1720,7 @@ static UIImage *ZUSButtonImage(void) {
         }
         if (!jrows.count) [jrows addObject:@{@"kind": @"info", @"title": @"Hôm nay chưa ghi được lần chặn nào theo đoạn chat (cần trích được mã đoạn chat)."}];
         [secs addObject:@{@"header": @"Nhật ký chặn hôm nay — theo đoạn chat", @"rows": jrows}];
-        [secs addObject:@{@"header": @"", @"footer": @"ZUS 1.1.8 • Thay đổi ăn ngay, không cần mở lại Zalo.", @"rows": @[
+        [secs addObject:@{@"header": @"", @"footer": @"ZUS 1.1.9 • Thay đổi ăn ngay, không cần mở lại Zalo.", @"rows": @[
             @{@"kind": @"switch", @"title": @"Ghi log gỡ lỗi", @"key": ZUS_KEY_DEBUG, @"def": @YES},
         ]}];
     }
@@ -2758,7 +2758,7 @@ static void ZUSInstallAdDiscovery(void) {
         ZUSInstallCaptureHooks();
         ZUSInstallLinkHooks();
         ZUSInstallAdDiscovery();
-        ZUSLog(@"ZUS 1.1.8 nạp vào Zalo (bật=%d, unseen=%d, ẩn đang nhập=%d)", gEnabled, gUnseen, gHideTyping);
+        ZUSLog(@"ZUS 1.1.9 nạp vào Zalo (bật=%d, unseen=%d, ẩn đang nhập=%d)", gEnabled, gUnseen, gHideTyping);
         {
             NSDictionary *fp0 = ZUSReadFilePrefs();
             id fe0 = fp0[ZUS_KEY_ENABLED];

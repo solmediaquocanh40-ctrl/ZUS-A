@@ -1,4 +1,4 @@
-# ZUS 1.1.8 (gói com.anhdang.zalounseen)
+# ZUS 1.1.9 (gói com.anhdang.zalounseen)
 
 Tweak chích vào Zalo trên máy đã jailbreak: đọc tin nhắn mà bên kia không thấy
 "đã xem" — đoạn chat vẫn giữ chữ đậm như chưa đọc — kèm tắt "đang nhập...",
@@ -30,6 +30,9 @@ chặn "đã nhận", chống thu hồi, ẩn đã xem Story và bộ công cụ
 - Trong Zalo: **ấn giữ thanh tab dưới đáy** (bất kỳ tab nào, ~0,5 giây) mở
   bảng công tắc + mục Danh bạ & hồ sơ + xem trạng thái dò; nút tròn **ZUS**
   ở màn hình chat vẫn còn làm lối vào dự phòng. (1.1.1)
+- **1.1.9 — đổi mô tả gói**: mô tả trong Sileo viết lại đầy đủ, dễ
+  hiểu, ghi rõ "Phát triển bởi Anh Đặng" (kèm đổi Author/Maintainer).
+  Không đổi tính năng so với 1.1.8.
 - **1.1.8 — sửa nút phân đoạn**: nút Chung/Bật/Tắt ở mục cài riêng
   theo đoạn chat bị trắng hoá, không phân biệt được đang chọn nút nào.
   Nay nút đang chọn nhuộm xanh đặc chữ trắng, nút chưa chọn xám nhạt
