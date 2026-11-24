@@ -1,4 +1,4 @@
-// ZUS 1.1.5 — đọc tin nhắn Zalo mà bên kia không thấy "đã xem", tắt "đang nhập...".
+// ZUS 1.1.6 — đọc tin nhắn Zalo mà bên kia không thấy "đã xem", tắt "đang nhập...".
 //
 // SỬA GỐC VỤ VĂNG CỦA 1.0.4 (đã chứng minh ở mức lệnh máy từ file .ips và đúng
 // file .deb đã cài): hàm thay thế chung ZUSGenericHook khai tham số kiểu `id`,
@@ -1291,7 +1291,7 @@ static NSString *ZUSExportProfile(void) {
     NSMutableDictionary *prof = [NSMutableDictionary dictionary];
     for (NSString *k in ZUSAllPrefKeys()) prof[k] = @(ZUSReadBool(k, NO));
     prof[@"_app"] = @"ZUS";
-    prof[@"_version"] = @"1.1.5";
+    prof[@"_version"] = @"1.1.6";
     NSData *json = [NSJSONSerialization dataWithJSONObject:prof options:NSJSONWritingPrettyPrinted error:nil];
     NSString *path = [ZUSDocsPath() stringByAppendingPathComponent:@"ZUS-Profile.json"];
     return [json writeToFile:path atomically:YES] ? path : nil;
@@ -1457,6 +1457,24 @@ static UIImage *ZUSButtonImage(void) {
     tv.delegate = self;
     [self.view addSubview:tv];
     self.zusTV = tv;
+    // 1.1.6: bản đầu ghim khung từ y=0 nên thanh tab chui dưới tai thỏ và
+    // thanh trạng thái, bị che mất (máy anh là 12 Pro tai thỏ). Neo thanh
+    // tab + bảng theo vùng an toàn, và tắt tiêu đề lớn của thanh điều
+    // hướng cho khỏi đè lên nhau.
+    self.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeNever;
+    if (self.navigationController) self.navigationController.navigationBar.prefersLargeTitles = NO;
+    bar.translatesAutoresizingMaskIntoConstraints = NO;
+    tv.translatesAutoresizingMaskIntoConstraints = NO;
+    [NSLayoutConstraint activateConstraints:@[
+        [bar.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
+        [bar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [bar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [bar.heightAnchor constraintEqualToConstant:48],
+        [tv.topAnchor constraintEqualToAnchor:bar.bottomAnchor],
+        [tv.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [tv.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [tv.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+    ]];
     [self zu_rebuild];
     [self zu_applyTheme];
 }
@@ -1590,7 +1608,7 @@ static UIImage *ZUSButtonImage(void) {
         }
         if (!jrows.count) [jrows addObject:@{@"kind": @"info", @"title": @"Hôm nay chưa ghi được lần chặn nào theo đoạn chat (cần trích được mã đoạn chat)."}];
         [secs addObject:@{@"header": @"Nhật ký chặn hôm nay — theo đoạn chat", @"rows": jrows}];
-        [secs addObject:@{@"header": @"", @"footer": @"ZUS 1.1.5 • Thay đổi ăn ngay, không cần mở lại Zalo.", @"rows": @[
+        [secs addObject:@{@"header": @"", @"footer": @"ZUS 1.1.6 • Thay đổi ăn ngay, không cần mở lại Zalo.", @"rows": @[
             @{@"kind": @"switch", @"title": @"Ghi log gỡ lỗi", @"key": ZUS_KEY_DEBUG, @"def": @YES},
         ]}];
     }
@@ -2312,7 +2330,7 @@ static void ZUSInstallLinkHooks(void) {
         ZUSInstallShieldObservers();
         ZUSInstallCaptureHooks();
         ZUSInstallLinkHooks();
-        ZUSLog(@"ZUS 1.1.5 nạp vào Zalo (bật=%d, unseen=%d, ẩn đang nhập=%d)", gEnabled, gUnseen, gHideTyping);
+        ZUSLog(@"ZUS 1.1.6 nạp vào Zalo (bật=%d, unseen=%d, ẩn đang nhập=%d)", gEnabled, gUnseen, gHideTyping);
         {
             NSDictionary *fp0 = ZUSReadFilePrefs();
             id fe0 = fp0[ZUS_KEY_ENABLED];
