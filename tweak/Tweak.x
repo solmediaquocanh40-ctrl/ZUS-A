@@ -1865,6 +1865,8 @@ static UIImage *ZUSButtonImage(void) {
 
 @end
 
+static void ZUSPromptUnlock(UIViewController *vc, UIView *veil);
+
 @interface ZUSInAppHandler : NSObject
 - (void)zu_openSettings:(id)sender;
 - (void)zu_openSettingsFromGesture:(UILongPressGestureRecognizer *)g;
