@@ -1,4 +1,4 @@
-# ZUS 1.1.3 (gói com.anhdang.zalounseen)
+# ZUS 1.1.4 (gói com.anhdang.zalounseen)
 
 Tweak chích vào Zalo trên máy đã jailbreak: đọc tin nhắn mà bên kia không thấy
 "đã xem" — đoạn chat vẫn giữ chữ đậm như chưa đọc — kèm tắt "đang nhập...",
@@ -30,6 +30,13 @@ chặn "đã nhận", chống thu hồi, ẩn đã xem Story và bộ công cụ
 - Trong Zalo: **ấn giữ thanh tab dưới đáy** (bất kỳ tab nào, ~0,5 giây) mở
   bảng công tắc + mục Danh bạ & hồ sơ + xem trạng thái dò; nút tròn **ZUS**
   ở màn hình chat vẫn còn làm lối vào dự phòng. (1.1.1)
+- **1.1.4 — chữa trích xuất danh bạ**: log 1.1.3 cho thấy bắt thực thể +
+  cloneFriendList đã chạy (266 bạn, lớp BuddyEntity) nhưng tên trường của
+  BuddyEntity là chữ thường (displayname, zaloid, userid, avatarurl,
+  contactname, mobile) trong khi danh sách khoá cũ dùng camelCase nên
+  trích ra toàn rỗng và sao lưu ghi 0 bạn. Đổi danh sách khoá theo đúng
+  dump. Bump version lần này rà đủ cả prefs/Resources/Info.plist và
+  workflow trong cây (hai chỗ từng sót ở 1.1.3).
 - **1.1.3 — hợp nhất kho cài đặt qua container + danh bạ vòng 3**: trang Cài
   đặt tự tìm file domain trong container của Zalo và đọc/ghi thẳng vào đó
   (hai điểm ghi đè chuẩn của PSListController), soi gương sang kho toàn cục

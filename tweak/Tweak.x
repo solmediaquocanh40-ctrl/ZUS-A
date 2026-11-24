@@ -1,4 +1,4 @@
-// ZUS 1.1.3 — đọc tin nhắn Zalo mà bên kia không thấy "đã xem", tắt "đang nhập...".
+// ZUS 1.1.4 — đọc tin nhắn Zalo mà bên kia không thấy "đã xem", tắt "đang nhập...".
 //
 // SỬA GỐC VỤ VĂNG CỦA 1.0.4 (đã chứng minh ở mức lệnh máy từ file .ips và đúng
 // file .deb đã cài): hàm thay thế chung ZUSGenericHook khai tham số kiểu `id`,
@@ -914,10 +914,14 @@ static void ZUSDiagDumpProperties(__unsafe_unretained id obj, NSString *label) {
 }
 
 static NSDictionary *ZUSFriendDict(id f) {
-    NSString *name = ZUSStringField(f, @[@"displayName", @"name", @"fullName", @"zaloName", @"username"]);
-    NSString *fid  = ZUSStringField(f, @[@"userId", @"uid", @"zaloId", @"userID", @"friendId", @"id"]);
-    NSString *phone = ZUSStringField(f, @[@"phoneNumber", @"phone", @"mobileNumber", @"mobile"]);
-    NSString *avatar = ZUSStringField(f, @[@"avatarURL", @"avatarUrl", @"avatar", @"avatarPath", @"avatarLink"]);
+    // 1.1.4: tên trường THẬT của BuddyEntity là chữ thường (log 1.1.3 đã
+    // dump đủ): displayname, zaloid, userid, avatarurl, contactname,
+    // mobile. Danh sách cũ dùng camelCase nên KVC không chạm được trường
+    // nào — lấy được 266 bạn mà trích ra toàn rỗng.
+    NSString *name = ZUSStringField(f, @[@"displayname", @"contactname", @"displayName", @"name", @"fullName", @"zaloName", @"newusername", @"username"]);
+    NSString *fid  = ZUSStringField(f, @[@"zaloid", @"userid", @"zaloId", @"userId", @"uid", @"userID", @"friendId", @"id"]);
+    NSString *phone = ZUSStringField(f, @[@"mobile", @"phoneNumber", @"phone", @"mobileNumber", @"_rawPhonenumber", @"rawPhonenumber"]);
+    NSString *avatar = ZUSStringField(f, @[@"avatarurl", @"bgavatarurl", @"avatarURL", @"avatarUrl", @"avatar", @"avatarPath", @"avatarLink"]);
     return @{@"name": name, @"id": fid, @"phone": phone, @"avatar": avatar};
 }
 
@@ -1160,7 +1164,7 @@ static NSString *ZUSExportProfile(void) {
     NSMutableDictionary *prof = [NSMutableDictionary dictionary];
     for (NSString *k in ZUSAllPrefKeys()) prof[k] = @(ZUSReadBool(k, NO));
     prof[@"_app"] = @"ZUS";
-    prof[@"_version"] = @"1.1.3";
+    prof[@"_version"] = @"1.1.4";
     NSData *json = [NSJSONSerialization dataWithJSONObject:prof options:NSJSONWritingPrettyPrinted error:nil];
     NSString *path = [ZUSDocsPath() stringByAppendingPathComponent:@"ZUS-Profile.json"];
     return [json writeToFile:path atomically:YES] ? path : nil;
@@ -1286,7 +1290,7 @@ static id ZUSDiagRead(NSString *key) {
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
-    return section == 2 ? @"ZUS 1.1.3 • Thay đổi ăn ngay, không cần mở lại Zalo." : nil;
+    return section == 2 ? @"ZUS 1.1.4 • Thay đổi ăn ngay, không cần mở lại Zalo." : nil;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -1543,7 +1547,7 @@ static void ZUSInstallTabBarGesture(void) {
                                         ZUS_NOTIFY, NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         ZUSInstallShieldObservers();
         ZUSInstallCaptureHooks();
-        ZUSLog(@"ZUS 1.1.3 nạp vào Zalo (bật=%d, unseen=%d, ẩn đang nhập=%d)", gEnabled, gUnseen, gHideTyping);
+        ZUSLog(@"ZUS 1.1.4 nạp vào Zalo (bật=%d, unseen=%d, ẩn đang nhập=%d)", gEnabled, gUnseen, gHideTyping);
         {
             NSDictionary *fp0 = ZUSReadFilePrefs();
             id fe0 = fp0[ZUS_KEY_ENABLED];
