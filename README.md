@@ -1,4 +1,4 @@
-# ZUS 1.1.6 (gói com.anhdang.zalounseen)
+# ZUS 1.1.7 (gói com.anhdang.zalounseen)
 
 Tweak chích vào Zalo trên máy đã jailbreak: đọc tin nhắn mà bên kia không thấy
 "đã xem" — đoạn chat vẫn giữ chữ đậm như chưa đọc — kèm tắt "đang nhập...",
@@ -30,6 +30,15 @@ chặn "đã nhận", chống thu hồi, ẩn đã xem Story và bộ công cụ
 - Trong Zalo: **ấn giữ thanh tab dưới đáy** (bất kỳ tab nào, ~0,5 giây) mở
   bảng công tắc + mục Danh bạ & hồ sơ + xem trạng thái dò; nút tròn **ZUS**
   ở màn hình chat vẫn còn làm lối vào dự phòng. (1.1.1)
+- **1.1.7 — sửa giao diện + tính năng mới**: theme viết lại kiểu
+  ZaloZen (xanh chỉ là điểm nhấn, tách màu ô khỏi màu thanh, nhuộm cả
+  chữ header/footer); icon Cài đặt thành huy hiệu tròn nhỏ; nút trong
+  Zalo hiện đúng logo con mắt (ép nguyên bản, hết bị nhuộm thành chấm
+  xanh). Mới: kho tin đã thu hồi; ấn giữ tin trong chat để tải video
+  (chọn chất lượng theo link trích được), tải ảnh gốc, dịch tin nhắn;
+  dò quảng cáo trong danh sách chat (mức dò — chỉ mặt qua log, chưa
+  giấu). Ấn-giữ/dò quảng cáo đều là vòng dò: log ghi bản đồ lớp ô và
+  model để hiệu chỉnh vòng sau.
 - **1.1.6 — sửa khung bảng ZUS**: thanh tab của bảng bị chui dưới tai
   thỏ/thanh trạng thái trên máy 12 Pro (ghim khung từ y=0). Neo lại theo
   vùng an toàn + tắt tiêu đề lớn của thanh điều hướng. Chỉ sửa khung,

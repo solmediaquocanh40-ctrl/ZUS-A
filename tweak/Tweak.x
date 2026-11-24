@@ -1,4 +1,4 @@
-// ZUS 1.1.6 — đọc tin nhắn Zalo mà bên kia không thấy "đã xem", tắt "đang nhập...".
+// ZUS 1.1.7 — đọc tin nhắn Zalo mà bên kia không thấy "đã xem", tắt "đang nhập...".
 //
 // SỬA GỐC VỤ VĂNG CỦA 1.0.4 (đã chứng minh ở mức lệnh máy từ file .ips và đúng
 // file .deb đã cài): hàm thay thế chung ZUSGenericHook khai tham số kiểu `id`,
@@ -102,6 +102,7 @@
 #import <objc/message.h>
 #import <substrate.h>
 #import <LocalAuthentication/LocalAuthentication.h>
+#import <Photos/Photos.h>
 #import "ZUSShared.h"
 
 // ---------------- Cài đặt ----------------
@@ -186,6 +187,7 @@ static BOOL gSchedEnabled = NO;
 static int gSchedFrom = 22 * 60;
 static int gSchedTo = 7 * 60;
 static BOOL gLinkWarning = NO;
+static BOOL gAdBlock = NO;
 static NSDictionary *gPerChat = nil;
 static NSDictionary *gLockedChats = nil;
 static NSMutableDictionary *gJournal = nil;
@@ -226,6 +228,7 @@ static void ZUSLoadPrefs(void) {
     gSchedFrom = ZUSReadInt(ZUS_KEY_SCHEDFROM, 22 * 60);
     gSchedTo = ZUSReadInt(ZUS_KEY_SCHEDTO, 7 * 60);
     gLinkWarning = ZUSReadBool(ZUS_KEY_LINKWARN, NO);
+    gAdBlock = ZUSReadBool(ZUS_KEY_ADBLOCK, NO);
     { id pc = ZUSReadObject(ZUS_KEY_PERCHAT); gPerChat = [pc isKindOfClass:[NSDictionary class]] ? pc : @{}; }
     { id lc = ZUSReadObject(ZUS_KEY_LOCKED); gLockedChats = [lc isKindOfClass:[NSDictionary class]] ? lc : @{}; }
     { id j = ZUSReadObject(ZUS_KEY_JOURNAL); gJournal = [j isKindOfClass:[NSDictionary class]] ? [j mutableCopy] : [NSMutableDictionary dictionary]; }
@@ -410,6 +413,52 @@ static void ZUSNoteCalledOnce(id self, SEL _cmd, NSString *key) {
     if (first) ZUSLog(@"lần đầu được gọi: %@.%@", NSStringFromClass(object_getClass(self)), NSStringFromSelector(_cmd));
 }
 
+
+// ----- 1.1.7: kho tin đã thu hồi -----
+// Mỗi lần một cửa chống thu hồi chặn thành công, cất nội dung tin (văn
+// bản / đường link media) vào kho trong prefs để xem lại ở tab Dữ liệu,
+// kể cả khi đoạn chat gốc đã trôi. Tối đa 200 tin gần nhất.
+static void ZUSVaultCapture(__unsafe_unretained id item) {
+    @try {
+        static NSArray *textKeys = nil;
+        if (!textKeys) textKeys = @[@"content", @"text", @"message", @"messageText", @"title"];
+        NSString *text = nil;
+        for (NSString *k in textKeys) {
+            id v = nil;
+            @try { v = [item valueForKey:k]; } @catch (NSException *e) {}
+            if ([v isKindOfClass:[NSString class]] && [v length]) { text = v; break; }
+        }
+        static NSArray *urlKeys = nil;
+        if (!urlKeys) urlKeys = @[@"mediaURL", @"mediaUrl", @"url", @"link", @"originURL", @"originUrl", @"hdURL", @"hdUrl", @"fileURL", @"videoURL", @"videoUrl", @"photoURL", @"imageURL", @"imageUrl"];
+        NSString *url = nil;
+        for (NSString *k in urlKeys) {
+            id v = nil;
+            @try { v = [item valueForKey:k]; } @catch (NSException *e) {}
+            if ([v isKindOfClass:[NSString class]] && [v hasPrefix:@"http"]) { url = v; break; }
+            if ([v isKindOfClass:[NSURL class]]) { url = [(NSURL *)v absoluteString]; break; }
+        }
+        if (!text.length && !url.length) {
+            static BOOL logged = NO;
+            if (!logged) { logged = YES; ZUSLog(@"kho thu hồi: cửa thu hồi chạy nhưng chưa trích được nội dung từ %@ — kho chỉ cất được khi trích trúng", NSStringFromClass([item class])); }
+            return;
+        }
+        NSMutableArray *vault = [NSMutableArray array];
+        id old = ZUSReadObject(ZUS_KEY_VAULT);
+        if ([old isKindOfClass:[NSArray class]]) [vault addObjectsFromArray:old];
+        NSDateFormatter *tf = [[NSDateFormatter alloc] init];
+        tf.dateFormat = @"dd/MM HH:mm";
+        [vault insertObject:@{@"time": [tf stringFromDate:[NSDate date]],
+                              @"chat": gZUSCurrentThreadName ?: @"",
+                              @"text": text ?: @"",
+                              @"url": url ?: @""} atIndex:0];
+        while (vault.count > 200) [vault removeLastObject];
+        ZUSWriteSharedValue(ZUS_KEY_VAULT, vault);
+        ZUSLog(@"kho thu hồi: đã cất 1 tin (văn bản %lu ký tự, link %@)", (unsigned long)text.length, url.length ? @"có" : @"không");
+    } @catch (NSException *e) {
+        ZUSLog(@"kho thu hồi: lỗi cất tin: %@", e.name);
+    }
+}
+
 static void ZUSNoteBlocked(id self, SEL _cmd, int cat) {
     NSString *desc = [NSString stringWithFormat:@"%@.%@", NSStringFromClass(object_getClass(self)), NSStringFromSelector(_cmd)];
     NSString *event = nil;
@@ -423,6 +472,7 @@ static void ZUSNoteBlocked(id self, SEL _cmd, int cat) {
         event = gLastEvent;
     }
     ZUSLog(@"ĐÃ CHẶN %@", event);
+    if (cat == 4) ZUSVaultCapture(self);
     if (gJournal && gZUSCurrentThreadID.length) {
         @synchronized (gJournal) {
             static NSDateFormatter *dayFmt = nil;
@@ -1280,6 +1330,53 @@ static NSArray *ZUSMissingFriendsFromPath(NSString *path) {
 
 @end
 
+
+@interface ZUSVaultController : UITableViewController
+@property (nonatomic, strong) NSArray *zusEntries;
+@end
+
+@implementation ZUSVaultController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"Kho tin đã thu hồi";
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    return (NSInteger)self.zusEntries.count;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"zv"];
+    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"zv"];
+    NSDictionary *e = self.zusEntries[(NSUInteger)indexPath.row];
+    cell.textLabel.text = [e[@"text"] length] ? e[@"text"] : @"(tin media — chạm để lấy link)";
+    cell.textLabel.numberOfLines = 2;
+    NSMutableArray *parts = [NSMutableArray array];
+    if ([e[@"time"] length]) [parts addObject:e[@"time"]];
+    if ([e[@"chat"] length]) [parts addObject:e[@"chat"]];
+    if ([e[@"url"] length]) [parts addObject:@"có link media"];
+    cell.detailTextLabel.text = [parts componentsJoinedByString:@" • "];
+    return cell;
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
+    return @"Các tin bị đối phương thu hồi mà ZUS đã chặn và cất lại. Chạm vào một tin để chép nội dung hoặc link media.";
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    NSDictionary *e = self.zusEntries[(NSUInteger)indexPath.row];
+    NSString *val = [e[@"url"] length] ? e[@"url"] : e[@"text"];
+    if (!val.length) return;
+    [UIPasteboard generalPasteboard].string = val;
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Đã chép" message:val preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:a animated:YES completion:nil];
+}
+
+@end
+
 // ----- Hồ sơ ZUS: xuất/nhập toàn bộ công tắc -----
 static NSArray *ZUSAllPrefKeys(void) {
     return @[ZUS_KEY_ENABLED, ZUS_KEY_UNSEEN, ZUS_KEY_DELIVERED, ZUS_KEY_TYPING, ZUS_KEY_ANTIRECALL,
@@ -1291,7 +1388,7 @@ static NSString *ZUSExportProfile(void) {
     NSMutableDictionary *prof = [NSMutableDictionary dictionary];
     for (NSString *k in ZUSAllPrefKeys()) prof[k] = @(ZUSReadBool(k, NO));
     prof[@"_app"] = @"ZUS";
-    prof[@"_version"] = @"1.1.6";
+    prof[@"_version"] = @"1.1.7";
     NSData *json = [NSJSONSerialization dataWithJSONObject:prof options:NSJSONWritingPrettyPrinted error:nil];
     NSString *path = [ZUSDocsPath() stringByAppendingPathComponent:@"ZUS-Profile.json"];
     return [json writeToFile:path atomically:YES] ? path : nil;
@@ -1343,6 +1440,16 @@ static NSString *ZUSHexFromColor(UIColor *c) {
     return [NSString stringWithFormat:@"#%02X%02X%02X", (int)(r * 255), (int)(g * 255), (int)(b * 255)];
 }
 
+static UIColor *ZUSBlendColor(UIColor *a, UIColor *b, CGFloat frac) {
+    CGFloat r1 = 0, g1 = 0, b1 = 0, a1 = 0, r2 = 0, g2 = 0, b2 = 0, a2 = 0;
+    [a getRed:&r1 green:&g1 blue:&b1 alpha:&a1];
+    [b getRed:&r2 green:&g2 blue:&b2 alpha:&a2];
+    return [UIColor colorWithRed:r1 + (r2 - r1) * frac green:g1 + (g2 - g1) * frac blue:b1 + (b2 - b1) * frac alpha:1.0];
+}
+
+// 1.1.7 viết lại theo ảnh mẫu ZaloZen của anh: nền trang và nền ô tách
+// riêng, màu mạnh (xanh) CHỈ là điểm nhấn — tab đang chọn, công tắc, dấu
+// tích, thanh tiêu đề — không còn nhuộm đặc cả bảng như 1.1.5/1.1.6.
 static NSDictionary *ZUSTheme(void) {
     int preset = ZUSReadInt(ZUS_KEY_THEME, 0);
     if (preset == 3) {
@@ -1353,11 +1460,12 @@ static NSDictionary *ZUSTheme(void) {
         CGFloat r = 0, g = 0, b = 0, a = 0;
         [bar getRed:&r green:&g blue:&b alpha:&a];
         UIColor *barText = (0.299 * r + 0.587 * g + 0.114 * b) > 0.6 ? [UIColor blackColor] : [UIColor whiteColor];
-        return @{@"bg": bg, @"bar": bar, @"text": text, @"accent": accent, @"barText": barText, @"preset": @3};
+        UIColor *surface = ZUSBlendColor(bar, bg, 0.88);
+        return @{@"bg": bg, @"bar": bar, @"surface": surface, @"text": text, @"accent": accent, @"barText": barText, @"preset": @3};
     }
-    if (preset == 1) return @{@"bg": [UIColor whiteColor], @"bar": [UIColor colorWithRed:0.95 green:0.95 blue:0.97 alpha:1.0], @"text": [UIColor blackColor], @"accent": [UIColor colorWithRed:0.0 green:0.48 blue:1.0 alpha:1.0], @"barText": [UIColor blackColor], @"preset": @1};
-    if (preset == 2) return @{@"bg": [UIColor whiteColor], @"bar": [UIColor colorWithRed:0.0 green:0.41 blue:1.0 alpha:1.0], @"text": [UIColor blackColor], @"accent": [UIColor colorWithRed:0.0 green:0.41 blue:1.0 alpha:1.0], @"barText": [UIColor whiteColor], @"preset": @2};
-    return @{@"bg": [UIColor colorWithRed:0.11 green:0.11 blue:0.12 alpha:1.0], @"bar": [UIColor colorWithRed:0.17 green:0.17 blue:0.18 alpha:1.0], @"text": [UIColor whiteColor], @"accent": [UIColor colorWithRed:0.04 green:0.52 blue:1.0 alpha:1.0], @"barText": [UIColor whiteColor], @"preset": @0};
+    if (preset == 1) return @{@"bg": [UIColor colorWithRed:0.95 green:0.95 blue:0.97 alpha:1.0], @"bar": [UIColor whiteColor], @"surface": [UIColor whiteColor], @"text": [UIColor blackColor], @"accent": [UIColor colorWithRed:0.0 green:0.48 blue:1.0 alpha:1.0], @"barText": [UIColor blackColor], @"preset": @1};
+    if (preset == 2) return @{@"bg": [UIColor colorWithRed:0.95 green:0.95 blue:0.97 alpha:1.0], @"bar": [UIColor colorWithRed:0.0 green:0.41 blue:1.0 alpha:1.0], @"surface": [UIColor whiteColor], @"text": [UIColor blackColor], @"accent": [UIColor colorWithRed:0.0 green:0.41 blue:1.0 alpha:1.0], @"barText": [UIColor whiteColor], @"preset": @2};
+    return @{@"bg": [UIColor colorWithRed:0.11 green:0.11 blue:0.12 alpha:1.0], @"bar": [UIColor colorWithRed:0.17 green:0.17 blue:0.18 alpha:1.0], @"surface": [UIColor colorWithRed:0.17 green:0.17 blue:0.18 alpha:1.0], @"text": [UIColor whiteColor], @"accent": [UIColor colorWithRed:0.04 green:0.52 blue:1.0 alpha:1.0], @"barText": [UIColor whiteColor], @"preset": @0};
 }
 
 static NSString *ZUSMinToStr(int m) {
@@ -1371,7 +1479,7 @@ static UIImage *ZUSButtonImage(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         NSData *d = [[NSData alloc] initWithBase64EncodedString:@"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" options:0];
-        if (d) img = [UIImage imageWithData:d scale:3.0];
+        if (d) img = [[UIImage imageWithData:d scale:3.0] imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
     });
     return img;
 }
@@ -1498,7 +1606,7 @@ static UIImage *ZUSButtonImage(void) {
     self.zusTV.backgroundColor = t[@"bg"];
     for (UIButton *b in self.zusTabBtns) {
         BOOL sel = (b.tag == self.zusTab);
-        b.backgroundColor = sel ? t[@"accent"] : t[@"bar"];
+        b.backgroundColor = sel ? t[@"accent"] : t[@"surface"];
         [b setTitleColor:sel ? [UIColor whiteColor] : t[@"text"] forState:UIControlStateNormal];
     }
     UINavigationBar *nb = self.navigationController.navigationBar;
@@ -1552,6 +1660,9 @@ static UIImage *ZUSButtonImage(void) {
             @{@"kind": @"time", @"title": @"Từ giờ", @"minkey": ZUS_KEY_SCHEDFROM, @"mindef": @(22 * 60)},
             @{@"kind": @"time", @"title": @"Đến giờ", @"minkey": ZUS_KEY_SCHEDTO, @"mindef": @(7 * 60)},
         ]}];
+        [secs addObject:@{@"header": @"Quảng cáo", @"footer": @"Vòng này ở mức DÒ: ZUS ghi vào ZUS.log các ô nghi là quảng cáo trong danh sách chat để chỉ mặt đúng lớp ô — CHƯA giấu, vì giấu nhầm đoạn chat thật là không chấp nhận được. Chỉ mặt trúng mới giấu ở vòng sau.", @"rows": @[
+            @{@"kind": @"switch", @"title": @"Dò quảng cáo trong danh sách chat", @"key": ZUS_KEY_ADBLOCK, @"def": @NO},
+        ]}];
         if (gLockedChats.count) {
             NSMutableArray *rows = [NSMutableArray array];
             for (NSString *tid in gLockedChats)
@@ -1562,6 +1673,7 @@ static UIImage *ZUSButtonImage(void) {
         [secs addObject:@{@"header": @"Danh bạ", @"rows": @[
             @{@"kind": @"action", @"title": @"Sao lưu danh bạ Zalo", @"act": @"backup"},
             @{@"kind": @"action", @"title": @"Khôi phục danh bạ (đối chiếu)", @"act": @"restore"},
+            @{@"kind": @"action", @"title": @"Kho tin đã thu hồi", @"act": @"vault"},
         ]}];
         [secs addObject:@{@"header": @"Hồ sơ ZUS", @"rows": @[
             @{@"kind": @"action", @"title": @"Xuất hồ sơ ZUS", @"act": @"export"},
@@ -1608,7 +1720,7 @@ static UIImage *ZUSButtonImage(void) {
         }
         if (!jrows.count) [jrows addObject:@{@"kind": @"info", @"title": @"Hôm nay chưa ghi được lần chặn nào theo đoạn chat (cần trích được mã đoạn chat)."}];
         [secs addObject:@{@"header": @"Nhật ký chặn hôm nay — theo đoạn chat", @"rows": jrows}];
-        [secs addObject:@{@"header": @"", @"footer": @"ZUS 1.1.6 • Thay đổi ăn ngay, không cần mở lại Zalo.", @"rows": @[
+        [secs addObject:@{@"header": @"", @"footer": @"ZUS 1.1.7 • Thay đổi ăn ngay, không cần mở lại Zalo.", @"rows": @[
             @{@"kind": @"switch", @"title": @"Ghi log gỡ lỗi", @"key": ZUS_KEY_DEBUG, @"def": @YES},
         ]}];
     }
@@ -1638,7 +1750,7 @@ static UIImage *ZUSButtonImage(void) {
     NSDictionary *t = self.zusTheme;
     UITableViewCellStyle style = ([kind isEqualToString:@"info2"] || [kind isEqualToString:@"time"]) ? UITableViewCellStyleSubtitle : UITableViewCellStyleDefault;
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:style reuseIdentifier:nil];
-    cell.backgroundColor = t[@"bar"];
+    cell.backgroundColor = t[@"surface"];
     cell.textLabel.text = row[@"title"];
     cell.textLabel.textColor = t[@"text"];
     cell.textLabel.numberOfLines = 0;
@@ -1742,6 +1854,7 @@ static UIImage *ZUSButtonImage(void) {
         else if ([act isEqualToString:@"export"]) [self zus_exportProfile];
         else if ([act isEqualToString:@"import"]) [self zus_importProfile];
         else if ([act isEqualToString:@"diag"]) [self zu_showDiag];
+        else if ([act isEqualToString:@"vault"]) [self zus_showVault];
     } else if ([kind isEqualToString:@"time"]) {
         ZUSTimePickerController *tp = [[ZUSTimePickerController alloc] init];
         tp.title = row[@"title"];
@@ -1837,6 +1950,17 @@ static UIImage *ZUSButtonImage(void) {
     [self presentViewController:sheet animated:YES completion:nil];
 }
 
+- (void)zus_showVault {
+    id v = ZUSReadObject(ZUS_KEY_VAULT);
+    if (![v isKindOfClass:[NSArray class]] || ![v count]) {
+        [self zus_showMessage:@"Kho đang trống. Khi có tin bị thu hồi mà ZUS chặn được và trích được nội dung, tin sẽ nằm ở đây."];
+        return;
+    }
+    ZUSVaultController *vc = [[ZUSVaultController alloc] initWithStyle:UITableViewStyleGrouped];
+    vc.zusEntries = v;
+    [self.navigationController pushViewController:vc animated:YES];
+}
+
 - (void)zus_exportProfile {
     NSString *path = ZUSExportProfile();
     if (!path) { [self zus_showMessage:@"Xuất hồ sơ không thành công."]; return; }
@@ -1881,7 +2005,62 @@ static UIImage *ZUSButtonImage(void) {
     [self presentViewController:a animated:YES completion:nil];
 }
 
+- (void)tableView:(UITableView *)tableView willDisplayHeaderView:(UIView *)view forSection:(NSInteger)section {
+    if ([view isKindOfClass:[UITableViewHeaderFooterView class]])
+        ((UITableViewHeaderFooterView *)view).textLabel.textColor = [self.zusTheme[@"text"] colorWithAlphaComponent:0.55];
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayFooterView:(UIView *)view forSection:(NSInteger)section {
+    if ([view isKindOfClass:[UITableViewHeaderFooterView class]])
+        ((UITableViewHeaderFooterView *)view).textLabel.textColor = [self.zusTheme[@"text"] colorWithAlphaComponent:0.55];
+}
+
 @end
+
+static void ZUSDownloadMedia(NSString *urlStr, BOOL isVideo, UIViewController *fromVC);
+static void ZUSTranslateText(NSString *text);
+static char kZUSMediaLPAssoc;
+
+// Trích thông tin media/văn bản từ model của một tin nhắn: quét mọi
+// thuộc tính chuỗi của model, phân loại video/ảnh theo đuôi file và tên
+// khoá; ghi bản đồ thuộc tính một lần cho mỗi lớp model để hiệu chỉnh.
+static NSDictionary *ZUSExtractMediaInfo(__unsafe_unretained id model) {
+    NSMutableDictionary *info = [@{@"videos": [NSMutableArray array], @"photos": [NSMutableArray array], @"text": @""} mutableCopy];
+    if (!model) return info;
+    static NSMutableSet *loggedClasses = nil;
+    if (!loggedClasses) loggedClasses = [NSMutableSet set];
+    NSString *cn = NSStringFromClass([model class]);
+    NSMutableArray *propNames = [NSMutableArray array];
+    unsigned pc = 0;
+    objc_property_t *pl = class_copyPropertyList([model class], &pc);
+    for (unsigned i = 0; i < pc; i++) [propNames addObject:@(property_getName(pl[i]))];
+    free(pl);
+    if (![loggedClasses containsObject:cn]) {
+        [loggedClasses addObject:cn];
+        ZUSLog(@"media: lớp model %@ — thuộc tính: %@", cn, [propNames componentsJoinedByString:@", "]);
+    }
+    NSArray *textKeys = @[@"content", @"text", @"messageText", @"message", @"title"];
+    for (NSString *k in textKeys) {
+        id v = nil;
+        @try { v = [model valueForKey:k]; } @catch (NSException *e) {}
+        if ([v isKindOfClass:[NSString class]] && [v length]) { info[@"text"] = v; break; }
+    }
+    for (NSString *k in propNames) {
+        id v = nil;
+        @try { v = [model valueForKey:k]; } @catch (NSException *e) {}
+        NSString *urlStr = nil;
+        if ([v isKindOfClass:[NSString class]] && [v hasPrefix:@"http"]) urlStr = v;
+        else if ([v isKindOfClass:[NSURL class]]) urlStr = [(NSURL *)v absoluteString];
+        if (!urlStr) continue;
+        NSString *low = [urlStr lowercaseString];
+        NSString *lk = [k lowercaseString];
+        BOOL isVideo = [low containsString:@".mp4"] || [low containsString:@".mov"] || [low containsString:@".m3u8"] || [lk containsString:@"video"];
+        BOOL isPhoto = [low containsString:@".jpg"] || [low containsString:@".jpeg"] || [low containsString:@".png"] || [low containsString:@".webp"] || [lk containsString:@"photo"] || [lk containsString:@"image"];
+        if (isVideo) [info[@"videos"] addObject:@{@"url": urlStr, @"key": k}];
+        else if (isPhoto) [info[@"photos"] addObject:@{@"url": urlStr, @"key": k}];
+    }
+    return info;
+}
 
 static void ZUSPromptUnlock(UIViewController *vc, UIView *veil);
 
@@ -1889,6 +2068,7 @@ static void ZUSPromptUnlock(UIViewController *vc, UIView *veil);
 - (void)zu_openSettings:(id)sender;
 - (void)zu_openSettingsFromGesture:(UILongPressGestureRecognizer *)g;
 - (void)zu_unlockTap:(UITapGestureRecognizer *)g;
+- (void)zu_mediaLongPress:(UILongPressGestureRecognizer *)g;
 @end
 
 @implementation ZUSInAppHandler
@@ -1939,6 +2119,76 @@ static void ZUSPromptUnlock(UIViewController *vc, UIView *veil);
         r = [r nextResponder];
     }
     if (vc && veil) ZUSPromptUnlock(vc, veil);
+}
+
+- (void)zu_mediaLongPress:(UILongPressGestureRecognizer *)g {
+    if (g.state != UIGestureRecognizerStateBegan) return;
+    UIView *scroll = g.view;
+    CGPoint pt = [g locationInView:scroll];
+    id cell = nil;
+    if ([scroll isKindOfClass:[UITableView class]]) {
+        NSIndexPath *ip = [(UITableView *)scroll indexPathForRowAtPoint:pt];
+        if (ip) cell = [(UITableView *)scroll cellForRowAtIndexPath:ip];
+    } else if ([scroll isKindOfClass:[UICollectionView class]]) {
+        NSIndexPath *ip = [(UICollectionView *)scroll indexPathForItemAtPoint:pt];
+        if (ip) cell = [(UICollectionView *)scroll cellForItemAtIndexPath:ip];
+    }
+    if (!cell) { ZUSLog(@"media: ấn-giữ không trúng ô nào"); return; }
+    static NSMutableSet *loggedCells = nil;
+    if (!loggedCells) loggedCells = [NSMutableSet set];
+    NSString *ccn = NSStringFromClass([cell class]);
+    if (![loggedCells containsObject:ccn]) {
+        [loggedCells addObject:ccn];
+        ZUSLog(@"media: lớp ô tin nhắn: %@", ccn);
+    }
+    id model = nil;
+    NSArray *mk = @[@"message", @"messageModel", @"model", @"item", @"data", @"entity", @"msg", @"contentModel", @"messageEntity", @"cellModel", @"viewModel"];
+    for (NSString *k in mk) {
+        @try { model = [cell valueForKey:k]; } @catch (NSException *e) {}
+        if (model) break;
+    }
+    if (!model) {
+        ZUSLog(@"media: chưa lấy được model từ ô %@ — %lu khoá ứng viên đều trượt", ccn, (unsigned long)mk.count);
+        return;
+    }
+    NSDictionary *info = ZUSExtractMediaInfo(model);
+    UIResponder *r = scroll;
+    UIViewController *vc = nil;
+    while (r) {
+        if ([r isKindOfClass:[UIViewController class]]) { vc = (UIViewController *)r; break; }
+        r = [r nextResponder];
+    }
+    if (!vc) return;
+    UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+    [fb impactOccurred];
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"ZUS" message:nil preferredStyle:UIAlertControllerStyleActionSheet];
+    for (NSDictionary *vd in info[@"videos"]) {
+        NSString *u = vd[@"url"];
+        NSString *low = [u lowercaseString];
+        NSString *label = [low containsString:@"1080"] ? @"1080p (Full HD)" : [low containsString:@"720"] ? @"720p (HD)" : [low containsString:@"480"] ? @"480p" : [low containsString:@"360"] ? @"360p" : @"bản có sẵn";
+        [sheet addAction:[UIAlertAction actionWithTitle:[NSString stringWithFormat:@"Tải video — %@", label] style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) { ZUSDownloadMedia(u, YES, vc); }]];
+    }
+    NSArray *photos = info[@"photos"];
+    if (photos.count) {
+        NSDictionary *best = photos[0];
+        for (NSDictionary *ph in photos) {
+            NSString *lk = [ph[@"key"] lowercaseString];
+            if ([lk containsString:@"origin"] || [lk containsString:@"full"] || [lk containsString:@"large"]) { best = ph; break; }
+        }
+        NSString *u = best[@"url"];
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Tải ảnh gốc" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) { ZUSDownloadMedia(u, NO, vc); }]];
+    }
+    NSString *text = info[@"text"];
+    if (text.length)
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Dịch tin nhắn" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) { ZUSTranslateText(text); }]];
+    if (!sheet.actions.count) {
+        ZUSLog(@"media: model %@ không trích được media/văn bản nào", NSStringFromClass([model class]));
+        return;
+    }
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Huỷ" style:UIAlertActionStyleCancel handler:nil]];
+    sheet.popoverPresentationController.sourceView = scroll;
+    sheet.popoverPresentationController.sourceRect = CGRectMake(pt.x, pt.y, 1, 1);
+    [vc presentViewController:sheet animated:YES completion:nil];
 }
 
 @end
@@ -2106,6 +2356,30 @@ static void ZUSChatViewWillAppear(__unsafe_unretained id self, SEL _cmd, BOOL an
         b.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleTopMargin;
         [b addTarget:gInAppHandler action:@selector(zu_openSettings:) forControlEvents:UIControlEventTouchUpInside];
         [v addSubview:b];
+        // 1.1.7: gắn ấn-giữ riêng vào khung cuộn của màn hình chat để mở
+        // tuỳ chọn tải video/ảnh/dịch cho từng tin — không móc hàm nào
+        // của Zalo, chỉ thêm một recognizer của mình.
+        @try {
+            UIView *scroll = nil;
+            NSMutableArray *stack = [NSMutableArray arrayWithObject:v];
+            while (stack.count && !scroll) {
+                UIView *cur = stack.lastObject;
+                [stack removeLastObject];
+                if ([cur isKindOfClass:[UITableView class]] || [cur isKindOfClass:[UICollectionView class]]) { scroll = cur; break; }
+                for (UIView *sub in cur.subviews) [stack addObject:sub];
+            }
+            if (scroll && !objc_getAssociatedObject(scroll, &kZUSMediaLPAssoc)) {
+                objc_setAssociatedObject(scroll, &kZUSMediaLPAssoc, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                static ZUSInAppHandler *mediaHandler = nil;
+                if (!mediaHandler) mediaHandler = [[ZUSInAppHandler alloc] init];
+                UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:mediaHandler action:@selector(zu_mediaLongPress:)];
+                lp.minimumPressDuration = 0.45;
+                [scroll addGestureRecognizer:lp];
+                ZUSLog(@"media: đã gắn ấn-giữ vào %@ của màn hình chat", NSStringFromClass([scroll class]));
+            }
+        } @catch (NSException *e) {
+            ZUSLog(@"media: lỗi gắn ấn-giữ: %@", e.name);
+        }
     } @catch (NSException *e) {
         ZUSLog(@"lỗi khi thêm nút trong Zalo: %@", e.name);
     }
@@ -2313,6 +2587,152 @@ static void ZUSInstallLinkHooks(void) {
     ZUSLog(@"link: tổng %d móc dò link", total);
 }
 
+
+// ----- 1.1.7: tải media về thư viện Ảnh + dịch tin nhắn -----
+static void ZUSDownloadMedia(NSString *urlStr, BOOL isVideo, UIViewController *fromVC) {
+    NSURL *url = [NSURL URLWithString:urlStr];
+    if (!url) return;
+    ZUSLog(@"tải media: bắt đầu %@ (%@)", urlStr, isVideo ? @"video" : @"ảnh");
+    NSURLSessionDownloadTask *task = [[NSURLSession sharedSession] downloadTaskWithURL:url completionHandler:^(NSURL *loc, NSURLResponse *resp, NSError *err) {
+        if (err || !loc) {
+            ZUSLog(@"tải media: LỖI %@", err.localizedDescription);
+            dispatch_async(dispatch_get_main_queue(), ^{ ZUSPresentAlertTop(@"Tải media", @"Tải không thành công — kiểm tra mạng rồi thử lại."); });
+            return;
+        }
+        NSString *ext = isVideo ? @"mp4" : (url.pathExtension.length ? url.pathExtension : @"jpg");
+        NSString *dest = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"ZUS-%@.%@", NSUUID.UUID.UUIDString, ext]];
+        [[NSFileManager defaultManager] moveItemAtPath:loc.path toPath:dest error:nil];
+        [PHPhotoLibrary requestAuthorizationForAccessLevel:PHAccessLevelAddOnly handler:^(PHAuthorizationStatus st) {
+            if (st == PHAuthorizationStatusAuthorized || st == PHAuthorizationStatusLimited) {
+                [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
+                    if (isVideo) [PHAssetChangeRequest creationRequestForAssetFromVideoAtFileURL:[NSURL fileURLWithPath:dest]];
+                    else [PHAssetChangeRequest creationRequestForAssetFromImageAtFileURL:[NSURL fileURLWithPath:dest]];
+                } completionHandler:^(BOOL ok, NSError *e2) {
+                    ZUSLog(@"tải media: lưu vào Ảnh %@", ok ? @"OK" : (e2.localizedDescription ?: @"trượt"));
+                    dispatch_async(dispatch_get_main_queue(), ^{ ZUSPresentAlertTop(@"Tải media", ok ? @"Đã lưu vào thư viện Ảnh." : @"Không lưu được vào thư viện Ảnh."); });
+                }];
+            } else {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    UIActivityViewController *av = [[UIActivityViewController alloc] initWithActivityItems:@[[NSURL fileURLWithPath:dest]] applicationActivities:nil];
+                    av.popoverPresentationController.sourceView = fromVC.view;
+                    [fromVC presentViewController:av animated:YES completion:nil];
+                });
+            }
+        }];
+    }];
+    [task resume];
+}
+
+static void ZUSTranslateText(NSString *text) {
+    NSString *q = [text stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+    NSString *u = [NSString stringWithFormat:@"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=vi&dt=t&q=%@", q];
+    ZUSLog(@"dịch: gửi dịch %lu ký tự", (unsigned long)text.length);
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithURL:[NSURL URLWithString:u] completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        NSString *out = nil;
+        if (data) {
+            id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            if ([json isKindOfClass:[NSArray class]] && [json count] && [json[0] isKindOfClass:[NSArray class]]) {
+                NSMutableString *acc = [NSMutableString string];
+                for (id seg in json[0])
+                    if ([seg isKindOfClass:[NSArray class]] && [seg count] && [seg[0] isKindOfClass:[NSString class]]) [acc appendString:seg[0]];
+                if (acc.length) out = acc;
+            }
+        }
+        ZUSLog(@"dịch: %@", out ? @"có kết quả" : @"KHÔNG có kết quả");
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ZUSPresentAlertTop(@"Dịch tin nhắn", out ?: [NSString stringWithFormat:@"Không dịch được (mạng hoặc định dạng lạ).\n\nNguyên văn: %@", text]);
+        });
+    }];
+    [task resume];
+}
+
+
+// ----- 1.1.7: dò quảng cáo trong danh sách chat (mức dò) -----
+static NSMutableDictionary *gAdOrigs = nil;
+
+static void ZUSAdScanCell(__unsafe_unretained id cell) {
+    static NSMutableSet *logged = nil;
+    if (!logged) logged = [NSMutableSet set];
+    NSString *ccn = NSStringFromClass([cell class]);
+    id model = nil;
+    NSArray *mk = @[@"conversation", @"conversationModel", @"model", @"item", @"data", @"entity", @"object", @"viewModel", @"cellModel"];
+    for (NSString *k in mk) {
+        @try { model = [cell valueForKey:k]; } @catch (NSException *e) {}
+        if (model) break;
+    }
+    NSString *combo = [NSString stringWithFormat:@"%@>%@", ccn, model ? NSStringFromClass([model class]) : @"-"];
+    if (![logged containsObject:combo]) {
+        [logged addObject:combo];
+        if (model) {
+            NSMutableArray *props = [NSMutableArray array];
+            unsigned pc = 0;
+            objc_property_t *pl = class_copyPropertyList([model class], &pc);
+            for (unsigned i = 0; i < pc; i++) [props addObject:@(property_getName(pl[i]))];
+            free(pl);
+            ZUSLog(@"quảng cáo: ô %@ — model %@ — thuộc tính: %@", ccn, NSStringFromClass([model class]), [props componentsJoinedByString:@", "]);
+        } else {
+            ZUSLog(@"quảng cáo: ô %@ — chưa lấy được model từ ô", ccn);
+        }
+    }
+    if (!model) return;
+    NSArray *flags = @[@"isAds", @"isAd", @"ads", @"isSponsored", @"sponsored", @"isPromotion", @"promotion", @"isPromoted", @"isAdvertisement", @"advertisement", @"isAdsContent"];
+    for (NSString *f in flags) {
+        id v = nil;
+        @try { v = [model valueForKey:f]; } @catch (NSException *e) {}
+        if ([v isKindOfClass:[NSNumber class]] && [v boolValue]) {
+            ZUSLog(@"quảng cáo: PHÁT HIỆN ô quảng cáo — %@.%@ = 1 (ô %@)", NSStringFromClass([model class]), f, ccn);
+            return;
+        }
+    }
+}
+
+static void ZUSAdWillDisplay(__unsafe_unretained id self, SEL _cmd, __unsafe_unretained id view, __unsafe_unretained id cell, __unsafe_unretained id ip) {
+    NSString *key = [NSString stringWithFormat:@"%@|%@", NSStringFromClass(object_getClass(self)), NSStringFromSelector(_cmd)];
+    void *orig = [gAdOrigs[key] pointerValue];
+    if (orig) ((void (*)(__unsafe_unretained id, SEL, __unsafe_unretained id, __unsafe_unretained id, __unsafe_unretained id))orig)(self, _cmd, view, cell, ip);
+    if (!gAdBlock) return;
+    @try { ZUSAdScanCell(cell); } @catch (NSException *e) {}
+}
+
+static void ZUSAdWalkAndHook(void) {
+    UIWindow *win = nil;
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *w in ((UIWindowScene *)scene).windows) if (w.isKeyWindow) { win = w; break; }
+        if (win) break;
+    }
+    UIViewController *root = win.rootViewController;
+    if (!root) { ZUSLog(@"quảng cáo: chưa thấy cửa sổ chính — sẽ thử lại"); return; }
+    NSMutableArray *tops = [NSMutableArray array];
+    if ([root isKindOfClass:[UITabBarController class]]) {
+        for (UIViewController *c in ((UITabBarController *)root).viewControllers) {
+            UIViewController *top = c;
+            if ([c isKindOfClass:[UINavigationController class]]) top = ((UINavigationController *)c).topViewController ?: c;
+            if (top) [tops addObject:top];
+        }
+    } else [tops addObject:root];
+    for (UIViewController *vc in tops) {
+        Class cls = [vc class];
+        ZUSLog(@"quảng cáo: màn hình tab — %@", NSStringFromClass(cls));
+        const char *sels[] = {"tableView:willDisplayCell:forRowAtIndexPath:", "collectionView:willDisplayCell:forItemAtIndexPath:"};
+        for (int i = 0; i < 2; i++) {
+            SEL sel = sel_registerName(sels[i]);
+            if (!class_getInstanceMethod(cls, sel)) continue;
+            NSString *key = [NSString stringWithFormat:@"%@|%@", NSStringFromClass(cls), NSStringFromSelector(sel)];
+            if (gAdOrigs[key]) continue;
+            void *orig = NULL;
+            MSHookMessageEx(cls, sel, (IMP)ZUSAdWillDisplay, (IMP *)&orig);
+            if (orig) { gAdOrigs[key] = [NSValue valueWithPointer:orig]; ZUSLog(@"quảng cáo: đã gắn móc dò hiển thị ô vào %@", key); }
+        }
+    }
+}
+
+static void ZUSInstallAdDiscovery(void) {
+    if (!gAdOrigs) gAdOrigs = [NSMutableDictionary dictionary];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ ZUSAdWalkAndHook(); });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ ZUSAdWalkAndHook(); });
+}
+
 %ctor {
     @autoreleasepool {
         gOrigs = [[NSMutableDictionary alloc] init];
@@ -2330,7 +2750,8 @@ static void ZUSInstallLinkHooks(void) {
         ZUSInstallShieldObservers();
         ZUSInstallCaptureHooks();
         ZUSInstallLinkHooks();
-        ZUSLog(@"ZUS 1.1.6 nạp vào Zalo (bật=%d, unseen=%d, ẩn đang nhập=%d)", gEnabled, gUnseen, gHideTyping);
+        ZUSInstallAdDiscovery();
+        ZUSLog(@"ZUS 1.1.7 nạp vào Zalo (bật=%d, unseen=%d, ẩn đang nhập=%d)", gEnabled, gUnseen, gHideTyping);
         {
             NSDictionary *fp0 = ZUSReadFilePrefs();
             id fe0 = fp0[ZUS_KEY_ENABLED];

@@ -35,6 +35,9 @@
 #define ZUS_KEY_LOCKED    @"lockedChats"
 #define ZUS_KEY_JOURNAL   @"journal"
 #define ZUS_KEY_LINKWARN  @"linkWarning"
+#define ZUS_KEY_ADBLOCK   @"adBlock"
+#define ZUS_KEY_VAULT     @"recallVault"
+
 
 
 // Khoá chẩn đoán: tweak ghi, trang Cài đặt đọc để hiện trạng thái dò.
