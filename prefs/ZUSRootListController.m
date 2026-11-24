@@ -9,6 +9,10 @@
 // đúng kho mà tweak đọc.
 #import "ZUSRootListController.h"
 #import "ZUSShared.h"
+// Bản viết lại dùng trực tiếp PSSpecifier trong chữ ký hai hàm ghi đè:
+// phải import header của nó, nếu không SDK mới báo "definition of
+// PSSpecifier must be imported from module Preferences.PSSpecifier".
+#import <Preferences/PSSpecifier.h>
 
 // Tìm file plist của domain ZUS bên trong container dữ liệu của Zalo.
 // File này chỉ tồn tại trong container của Zalo (do chính tweak tạo qua
