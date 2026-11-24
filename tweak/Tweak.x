@@ -1,4 +1,4 @@
-// ZUS 1.1.1 — đọc tin nhắn Zalo mà bên kia không thấy "đã xem", tắt "đang nhập...".
+// ZUS 1.1.2 — đọc tin nhắn Zalo mà bên kia không thấy "đã xem", tắt "đang nhập...".
 //
 // SỬA GỐC VỤ VĂNG CỦA 1.0.4 (đã chứng minh ở mức lệnh máy từ file .ips và đúng
 // file .deb đã cài): hàm thay thế chung ZUSGenericHook khai tham số kiểu `id`,
@@ -119,7 +119,49 @@ static BOOL gPrefsSeen = NO;
 
 static void ZUSLog(NSString *fmt, ...);
 
+// ----- Kho prefs CHUNG (1.1.2) -----
+// Bài học đắt của 1.1.1: CFPreferences gọi từ trong Zalo rơi vào kho
+// container của Zalo, còn trang Cài đặt ghi vào file chung
+// /var/mobile/Library/Preferences — hai kho lệch nhau khiến anh tắt tổng
+// trong Zalo rồi gạt lại ở Cài đặt suốt một giờ mà tweak không hề biết.
+// Từ 1.1.2: FILE CHUNG là nguồn chính — đọc file trước (không có khoá mới
+// ngã về CFPreferences rồi mặc định), ghi thì ghi CẢ HAI nơi cho hai kho
+// hội tụ dần. Kết quả đọc/ghi file đều có log để kiểm chứng trên máy thật.
+static NSString *ZUSSharedPrefsPath(void) {
+    return [@"/var/mobile/Library/Preferences/" stringByAppendingString:[ZUS_DOMAIN stringByAppendingString:@".plist"]];
+}
+static NSDictionary *ZUSReadFilePrefs(void) {
+    return [NSDictionary dictionaryWithContentsOfFile:ZUSSharedPrefsPath()];
+}
+static BOOL gFileWriteLogged = NO;
+// Mọi lần sửa file chung đều qua một khoá duy nhất (đọc–sửa–ghi là một khối)
+// để luồng chặn tin và luồng giao diện không ghi đè lẫn nhau.
+static NSObject *ZUSPrefsFileLock(void) {
+    static NSObject *lock = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ lock = [[NSObject alloc] init]; });
+    return lock;
+}
+static void ZUSWriteSharedValue(NSString *key, id value) {
+    NSMutableDictionary *fp = nil;
+    BOOL wok = NO;
+    @synchronized (ZUSPrefsFileLock()) {
+        fp = [ZUSReadFilePrefs() mutableCopy];
+        if (!fp) fp = [NSMutableDictionary dictionary];
+        if (value) fp[key] = value; else [fp removeObjectForKey:key];
+        wok = [fp writeToFile:ZUSSharedPrefsPath() atomically:YES];
+    }
+    if (!gFileWriteLogged) {
+        gFileWriteLogged = YES;
+        ZUSLog(@"ghi file prefs chung: %@", wok ? @"OK" : @"THẤT BẠI (có thể bị sandbox chặn ghi — đọc log nguồn cài đặt để đối chiếu)");
+    }
+    CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)value, (__bridge CFStringRef)ZUS_DOMAIN);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)ZUS_DOMAIN);
+}
+
 static BOOL ZUSReadBool(NSString *key, BOOL def) {
+    id fv = ZUSReadFilePrefs()[key];
+    if ([fv isKindOfClass:[NSNumber class]]) return [fv boolValue];
     CFPropertyListRef v = CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)ZUS_DOMAIN);
     if (!v) return def;
     BOOL r = def;
@@ -165,8 +207,7 @@ static void ZUSPrefsChanged(CFNotificationCenterRef center, void *observer, CFSt
 // Ghi một khoá cài đặt rồi phát thông báo để chính tweak nạp lại ngay (dùng
 // cho bảng công tắc trong Zalo; trang Cài đặt của máy đi đường Preferences).
 static void ZUSSetPrefBool(NSString *key, BOOL val) {
-    CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)@(val), (__bridge CFStringRef)ZUS_DOMAIN);
-    CFPreferencesAppSynchronize((__bridge CFStringRef)ZUS_DOMAIN);
+    ZUSWriteSharedValue(key, @(val));
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), ZUS_NOTIFY, NULL, NULL, true);
 }
 
@@ -206,6 +247,22 @@ static void ZUSWriteDiag(void) {
     CFPreferencesSetAppValue((__bridge CFStringRef)ZUS_DIAG_LAST, (__bridge CFPropertyListRef)gLastEvent, (__bridge CFStringRef)ZUS_DOMAIN);
     CFPreferencesAppSynchronize((__bridge CFStringRef)ZUS_DOMAIN);
     gLastDiagWrite = [NSDate timeIntervalSinceReferenceDate];
+    // 1.1.2: chụp thêm xuống file chung (tối đa 15 giây một lần) để mục
+    // trạng thái dò ở trang Cài đặt của máy đọc được số thật.
+    static NSTimeInterval sLastFileDiag = 0;
+    if (gLastDiagWrite - sLastFileDiag >= 15.0) {
+        sLastFileDiag = gLastDiagWrite;
+        @synchronized (ZUSPrefsFileLock()) {
+            NSMutableDictionary *fp = [ZUSReadFilePrefs() mutableCopy];
+            if (!fp) fp = [NSMutableDictionary dictionary];
+            fp[ZUS_DIAG_BLOCKED_READ] = @(gBlockedRead);
+            fp[ZUS_DIAG_BLOCKED_TYPE] = @(gBlockedTyping);
+            fp[ZUS_DIAG_BLOCKED_DELIV] = @(gBlockedDelivered);
+            fp[ZUS_DIAG_BLOCKED_RECALL] = @(gBlockedRecall);
+            fp[ZUS_DIAG_LAST] = gLastEvent;
+            [fp writeToFile:ZUSSharedPrefsPath() atomically:YES];
+        }
+    }
 }
 
 static void ZUSWriteDiagThrottled(void) {
@@ -564,10 +621,10 @@ static void ZUSInstallWhitelist(void) {
         ZUSInstallHook(cls, m, isClass, e->cat, repl);
     }
     ZUSLog(@"danh sách trắng: %u mục, đã móc tổng %ld", kZUSWhitelistCount, gHookedTotal);
-    CFPreferencesSetAppValue((__bridge CFStringRef)ZUS_DIAG_CANDIDATES, (__bridge CFPropertyListRef)@(kZUSWhitelistCount), (__bridge CFStringRef)ZUS_DOMAIN);
-    CFPreferencesSetAppValue((__bridge CFStringRef)ZUS_DIAG_HOOKED, (__bridge CFPropertyListRef)@(gHookedTotal), (__bridge CFStringRef)ZUS_DOMAIN);
-    CFPreferencesSetAppValue((__bridge CFStringRef)ZUS_DIAG_SKIPPED, (__bridge CFPropertyListRef)@((long)kZUSWhitelistCount - gHookedTotal), (__bridge CFStringRef)ZUS_DOMAIN);
-    CFPreferencesSetAppValue((__bridge CFStringRef)ZUS_DIAG_SCAN, (__bridge CFPropertyListRef)[gLogFmt stringFromDate:[NSDate date]], (__bridge CFStringRef)ZUS_DOMAIN);
+    ZUSWriteSharedValue(ZUS_DIAG_CANDIDATES, @(kZUSWhitelistCount));
+    ZUSWriteSharedValue(ZUS_DIAG_HOOKED, @(gHookedTotal));
+    ZUSWriteSharedValue(ZUS_DIAG_SKIPPED, @((long)kZUSWhitelistCount - gHookedTotal));
+    ZUSWriteSharedValue(ZUS_DIAG_SCAN, [gLogFmt stringFromDate:[NSDate date]]);
     ZUSWriteDiag();
 }
 
@@ -577,6 +634,8 @@ static void ZUSInstallWhitelist(void) {
 // mặc định TẮT (trừ khi ghi chú khác), hỏng thì chỉ hỏng phần đó.
 
 static NSString *ZUSReadString(NSString *key) {
+    id fv = ZUSReadFilePrefs()[key];
+    if ([fv isKindOfClass:[NSString class]]) return fv;
     CFPropertyListRef v = CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)ZUS_DOMAIN);
     if (!v) return nil;
     NSString *r = nil;
@@ -654,12 +713,11 @@ static void ZUSCheckZaloVersion(void) {
     NSString *last = ZUSReadString(ZUS_KEY_ZALOVER);
     if (last.length && ![last isEqualToString:cur]) {
         ZUSLog(@"Zalo vừa đổi phiên bản: %@ -> %@ — nếu có tính năng lạ, gửi log để kiểm tra lại cửa móc", last, cur);
-        CFPreferencesSetAppValue((__bridge CFStringRef)ZUS_DIAG_ZALOUPD, (__bridge CFPropertyListRef)cur, (__bridge CFStringRef)ZUS_DOMAIN);
+        ZUSWriteSharedValue(ZUS_DIAG_ZALOUPD, cur);
         CFPreferencesAppSynchronize((__bridge CFStringRef)ZUS_DOMAIN);
     }
     if (![last isEqualToString:cur]) {
-        CFPreferencesSetAppValue((__bridge CFStringRef)ZUS_KEY_ZALOVER, (__bridge CFPropertyListRef)cur, (__bridge CFStringRef)ZUS_DOMAIN);
-        CFPreferencesAppSynchronize((__bridge CFStringRef)ZUS_DOMAIN);
+        ZUSWriteSharedValue(ZUS_KEY_ZALOVER, cur);
     }
 }
 
@@ -718,8 +776,7 @@ static NSArray *ZUSFriendsFromManager(id inst, NSString *srcName) {
             else if ([r isKindOfClass:[NSDictionary class]]) arr = [(NSDictionary *)r allValues];
             if (arr.count) {
                 ZUSLog(@"danh bạ: lấy được %lu bạn từ %@.%@", (unsigned long)arr.count, srcName, sn);
-                CFPreferencesSetAppValue((__bridge CFStringRef)ZUS_DIAG_FRIENDSRC, (__bridge CFPropertyListRef)[NSString stringWithFormat:@"%@.%@", srcName, sn], (__bridge CFStringRef)ZUS_DOMAIN);
-                CFPreferencesAppSynchronize((__bridge CFStringRef)ZUS_DOMAIN);
+                ZUSWriteSharedValue(ZUS_DIAG_FRIENDSRC, [NSString stringWithFormat:@"%@.%@", srcName, sn]);
                 return arr;
             }
             if (r) ZUSLog(@"danh bạ: %@.%@ có tồn tại nhưng trả về %@ (rỗng hoặc chưa sẵn sàng)", srcName, sn, NSStringFromClass([r class]));
@@ -822,8 +879,7 @@ static NSString *ZUSBackupContacts(void) {
         [vcf appendString:@"END:VCARD\n"];
     }
     [vcf writeToFile:[docs stringByAppendingPathComponent:@"ZUS-Contacts.vcf"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    CFPreferencesSetAppValue((__bridge CFStringRef)ZUS_DIAG_FRIENDS, (__bridge CFPropertyListRef)@(friends.count), (__bridge CFStringRef)ZUS_DOMAIN);
-    CFPreferencesAppSynchronize((__bridge CFStringRef)ZUS_DOMAIN);
+    ZUSWriteSharedValue(ZUS_DIAG_FRIENDS, @(friends.count));
     ZUSLog(@"danh bạ: đã sao lưu %lu bạn vào Documents của Zalo (ZUS-Contacts.json/.csv/.vcf)", (unsigned long)friends.count);
     return [NSString stringWithFormat:@"Đã sao lưu %lu bạn bè vào thư mục Documents của Zalo:\nZUS-Contacts.json (cho khôi phục)\nZUS-Contacts.csv (mở bằng Excel)\nZUS-Contacts.vcf (đưa vào Danh bạ máy)", (unsigned long)friends.count];
 }
@@ -907,7 +963,7 @@ static NSString *ZUSExportProfile(void) {
     NSMutableDictionary *prof = [NSMutableDictionary dictionary];
     for (NSString *k in ZUSAllPrefKeys()) prof[k] = @(ZUSReadBool(k, NO));
     prof[@"_app"] = @"ZUS";
-    prof[@"_version"] = @"1.1.1";
+    prof[@"_version"] = @"1.1.2";
     NSData *json = [NSJSONSerialization dataWithJSONObject:prof options:NSJSONWritingPrettyPrinted error:nil];
     NSString *path = [ZUSDocsPath() stringByAppendingPathComponent:@"ZUS-Profile.json"];
     return [json writeToFile:path atomically:YES] ? path : nil;
@@ -1033,7 +1089,7 @@ static id ZUSDiagRead(NSString *key) {
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
-    return section == 2 ? @"ZUS 1.1.1 • Thay đổi ăn ngay, không cần mở lại Zalo." : nil;
+    return section == 2 ? @"ZUS 1.1.2 • Thay đổi ăn ngay, không cần mở lại Zalo." : nil;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -1152,7 +1208,7 @@ static id ZUSDiagRead(NSString *key) {
 - (void)zu_openSettingsFromGesture:(UILongPressGestureRecognizer *)g {
     if (g.state != UIGestureRecognizerStateBegan) return;
     ZUSLoadPrefs();
-    if (!gEnabled || !gLongPressTab) return;
+    if (!gLongPressTab) return;
     UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
     [fb impactOccurred];
     UIResponder *r = (UIResponder *)g.view;
@@ -1187,7 +1243,7 @@ static void ZUSChatViewWillAppear(__unsafe_unretained id self, SEL _cmd, BOOL an
         UIView *v = vc.view;
         if (!v) return;
         UIView *existing = [v viewWithTag:23125]; // "ZUS"
-        if (!gEnabled || !gInAppUI) { [existing removeFromSuperview]; return; }
+        if (!gInAppUI) { [existing removeFromSuperview]; return; } // 1.1.2: nút là lối vào cài đặt — luôn hiện kể cả khi tổng tắt, kẻo lỡ tắt là khoá ngoài
         if (existing) return;
         if (!gInAppHandler) gInAppHandler = [[ZUSInAppHandler alloc] init];
         UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -1230,7 +1286,7 @@ static void ZUSInstallInAppButton(void) {
 static BOOL gTabGestureInstalled = NO;
 static void ZUSInstallTabBarGesture(void) {
     if (gTabGestureInstalled) return;
-    if (!gEnabled || !gLongPressTab) return;
+    if (!gLongPressTab) return; // 1.1.2: không còn cổng công tắc tổng — ấn giữ là lối vào, phải gắn cả khi tweak đang tắt
     @try {
         UIWindow *win = nil;
         for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
@@ -1289,16 +1345,18 @@ static void ZUSInstallTabBarGesture(void) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, ZUSPrefsChanged,
                                         ZUS_NOTIFY, NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         ZUSInstallShieldObservers();
-        ZUSLog(@"ZUS 1.1.1 nạp vào Zalo (bật=%d, unseen=%d, ẩn đang nhập=%d)", gEnabled, gUnseen, gHideTyping);
+        ZUSLog(@"ZUS 1.1.2 nạp vào Zalo (bật=%d, unseen=%d, ẩn đang nhập=%d)", gEnabled, gUnseen, gHideTyping);
+        {
+            NSDictionary *fp0 = ZUSReadFilePrefs();
+            id fe0 = fp0[ZUS_KEY_ENABLED];
+            ZUSLog(@"nguồn cài đặt: file chung %@, khoá bật trong file: %@, hiệu lực bật=%d", fp0 ? @"đọc được" : @"KHÔNG đọc được", fe0 ? [fe0 description] : @"(chưa có)", gEnabled);
+        }
         ZUSCheckZaloVersion();
         // Mốc "đã nạp" ghi thẳng vào kho prefs ngay khi ctor chạy (thêm ở 1.0.1):
         // bằng chứng tweak có chạy trong Zalo hay không, đọc được ở trang Cài đặt
         // lẫn file /var/mobile/Library/Preferences/com.anhdang.zalounseen.plist —
         // không phụ thuộc file log trong Documents của Zalo như bản 1.0.0.
-        CFPreferencesSetAppValue((__bridge CFStringRef)ZUS_DIAG_CTOR,
-                                 (__bridge CFPropertyListRef)[gLogFmt stringFromDate:[NSDate date]],
-                                 (__bridge CFStringRef)ZUS_DOMAIN);
-        CFPreferencesAppSynchronize((__bridge CFStringRef)ZUS_DOMAIN);
+        ZUSWriteSharedValue(ZUS_DIAG_CTOR, [gLogFmt stringFromDate:[NSDate date]]);
         // Lắp móc theo danh sách trắng sau 1 giây (thử lại 7 giây sau đó cho mục
         // nào class nạp muộn; hàm đã móc rồi thì tự bỏ qua).
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{

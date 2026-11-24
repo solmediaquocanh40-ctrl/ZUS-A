@@ -1,4 +1,4 @@
-# ZUS 1.1.1 (gói com.anhdang.zalounseen)
+# ZUS 1.1.2 (gói com.anhdang.zalounseen)
 
 Tweak chích vào Zalo trên máy đã jailbreak: đọc tin nhắn mà bên kia không thấy
 "đã xem" — đoạn chat vẫn giữ chữ đậm như chưa đọc — kèm tắt "đang nhập...",
@@ -30,6 +30,11 @@ chặn "đã nhận", chống thu hồi, ẩn đã xem Story và bộ công cụ
 - Trong Zalo: **ấn giữ thanh tab dưới đáy** (bất kỳ tab nào, ~0,5 giây) mở
   bảng công tắc + mục Danh bạ & hồ sơ + xem trạng thái dò; nút tròn **ZUS**
   ở màn hình chat vẫn còn làm lối vào dự phòng. (1.1.1)
+- **1.1.2 — chữa lỗi hai kho cài đặt**: tweak đọc/ghi thẳng file prefs chung
+  `/var/mobile/Library/Preferences/com.anhdang.zalounseen.plist` (đọc file
+  trước, ghi cả hai kho) nên gạt trong Zalo và trong Cài đặt của máy từ nay
+  là MỘT. Nút ZUS + ấn giữ thanh tab luôn hiện kể cả khi công tắc tổng tắt
+  (chúng là lối vào cài đặt) — lỡ tắt ở đâu cũng mở lại ngay tại đó.
 - Sao lưu danh bạ vòng 2 (1.1.1): bám thẳng `FriendFlowManager.cloneFriendList`
   — nguồn log 1.1.0 đã chỉ — qua `ChatDataManager.friendFlowManager`.
 - Trong Cài đặt của máy: mục **ZUS** (có icon) với cùng các công tắc.
