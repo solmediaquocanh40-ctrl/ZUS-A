@@ -1,4 +1,4 @@
-// ZUS 1.2.0 — đọc tin nhắn Zalo mà bên kia không thấy "đã xem", tắt "đang nhập...".
+// ZUS 1.2.1 — đọc tin nhắn Zalo mà bên kia không thấy "đã xem", tắt "đang nhập...".
 //
 // SỬA GỐC VỤ VĂNG CỦA 1.0.4 (đã chứng minh ở mức lệnh máy từ file .ips và đúng
 // file .deb đã cài): hàm thay thế chung ZUSGenericHook khai tham số kiểu `id`,
@@ -193,7 +193,6 @@ static BOOL gAdBlock = NO;
 static BOOL gLicensed = NO;
 static int gLicenseState = 0;
 static NSString *gLicenseName = @"";
-static int gTrialDaysLeft = 0;
 static int gLicenseDaysLeft = -1;
 static void ZUSShowActivationPopup(void);
 static void ZUSDismissActivationPopup(void);
@@ -220,7 +219,7 @@ static int ZUSReadInt(NSString *key, int def) {
 }
 
 
-// ---------------- 1.2.0: bản quyền — dùng thử + key kích hoạt ----------------
+// ---------------- Bản quyền — key kích hoạt (1.2.0 thử nghiệm dùng thử, 1.2.1 bản dùng thật) ----------------
 // Key có chữ ký ECDSA P-256; tweak chỉ giữ khoá CÔNG KHAI để kiểm tra,
 // khoá bí mật nằm ở công cụ sinh key riêng (không có trong gói này).
 static NSData *ZUSBase32Decode(NSString *str) {
@@ -339,69 +338,27 @@ static NSString *ZUSKeyHashHex(NSString *key) {
     return h;
 }
 
-static NSString *ZUSObfEncode(long long v) {
-    long long x = v ^ 0x5A5A5A5A5A5A5A5ALL;
-    return [[NSData dataWithBytes:&x length:sizeof(x)] base64EncodedStringWithOptions:0];
-}
-
-static long long ZUSObfDecode(NSString *str) {
-    NSData *d = [[NSData alloc] initWithBase64EncodedString:str options:0];
-    if (!d || d.length != 8) return -1;
-    long long x = 0;
-    [d getBytes:&x length:8];
-    return x ^ 0x5A5A5A5A5A5A5A5ALL;
-}
-
-#define ZUS_TRIAL_FILE @"/var/mobile/Documents/.com.apple.akd.cache"
-
-static void ZUSWriteTrialStart(long long start) {
-    ZUSWriteSharedValue(@"trialStart", @(start));
-    ZUSKeychainSet(@"t0", ZUSObfEncode(start));
-    [ZUSObfEncode(start) writeToFile:ZUS_TRIAL_FILE atomically:YES encoding:NSUTF8StringEncoding error:nil];
-}
-
-// Đánh giá trạng thái bản quyền: key hợp lệ > dùng thử 3 ngày > hết hạn.
-// Mốc bắt đầu dùng thử lấy mốc SỚM NHẤT trong 3 nơi lưu (prefs chung,
-// Keychain, file ngoài) — xoá 1 nơi không reset được. Chống vặn ngược
-// đồng hồ bằng mốc ngày lớn nhất từng thấy.
+// Đánh giá trạng thái bản quyền — BẢN DÙNG THẬT (anh chốt ở 1.2.1):
+// KHÔNG có dùng thử. Chỉ key hợp lệ mới mở được chức năng. Kết quả
+// được ghi đệm vào file chung để trang Cài đặt đọc và tự khoá theo.
 static void ZUSLicenseEvaluate(void) {
-    long long start = -1;
-    id pv = ZUSReadObject(@"trialStart");
-    if ([pv isKindOfClass:[NSNumber class]]) start = [pv longLongValue];
-    NSString *k0 = ZUSKeychainGet(@"t0");
-    if (k0) { long long v = ZUSObfDecode(k0); if (v >= 0 && (start < 0 || v < start)) start = v; }
-    NSString *fc = [NSString stringWithContentsOfFile:ZUS_TRIAL_FILE encoding:NSUTF8StringEncoding error:nil];
-    if (fc) { long long v = ZUSObfDecode([fc stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]); if (v >= 0 && (start < 0 || v < start)) start = v; }
-    long long nowDay = (long long)([[NSDate date] timeIntervalSince1970] / 86400.0);
-    if (start < 0) { start = nowDay; ZUSWriteTrialStart(start); }
-    long long maxSeen = start;
-    id mv = ZUSReadObject(@"trialMaxSeen");
-    if ([mv isKindOfClass:[NSNumber class]]) maxSeen = MAX(maxSeen, [mv longLongValue]);
-    NSString *km = ZUSKeychainGet(@"tm");
-    if (km) { long long v = ZUSObfDecode(km); if (v > maxSeen) maxSeen = v; }
-    if (nowDay > maxSeen) {
-        maxSeen = nowDay;
-        ZUSWriteSharedValue(@"trialMaxSeen", @(maxSeen));
-        ZUSKeychainSet(@"tm", ZUSObfEncode(maxSeen));
-    }
-    long long effNow = MAX(nowDay, maxSeen);
-    gLicenseState = 2;
+    gLicenseState = 0;
     gLicensed = NO;
     gLicenseName = @"";
-    gTrialDaysLeft = 0;
     gLicenseDaysLeft = -1;
     NSString *key = ZUSReadString(ZUS_KEY_LICENSE);
     NSDictionary *info = key.length ? ZUSVerifyLicenseKey(key) : nil;
     if (info) {
         int kind = [info[@"kind"] intValue];
         long long field = [info[@"exp"] longLongValue];
+        long long nowDay = (long long)([[NSDate date] timeIntervalSince1970] / 86400.0);
         BOOL ok = NO;
         if (kind == 1) {
             ok = YES;
         } else if (kind == 0) {
-            if ([info[@"devHash"] isEqualToData:ZUSDeviceHash()] && (field == 0 || effNow <= field)) {
+            if ([info[@"devHash"] isEqualToData:ZUSDeviceHash()] && (field == 0 || nowDay <= field)) {
                 ok = YES;
-                if (field) gLicenseDaysLeft = (int)(field - effNow);
+                if (field) gLicenseDaysLeft = (int)(field - nowDay);
             }
         } else if (kind == 3) {
             NSString *kh = ZUSKeyHashHex(key);
@@ -414,20 +371,21 @@ static void ZUSLicenseEvaluate(void) {
                 if (parts.count == 2 && [parts[0] isEqualToString:kh]) actDay = MAX(actDay, [parts[1] longLongValue]);
             }
             if (actDay <= 0) {
-                actDay = effNow;
+                actDay = nowDay;
                 ZUSWriteSharedValue(@"licenseAct", @{@"hash": kh, @"day": @(actDay)});
                 ZUSKeychainSet(@"ta", [NSString stringWithFormat:@"%@:%lld", kh, actDay]);
             }
-            if (effNow < actDay + field) { ok = YES; gLicenseDaysLeft = (int)(actDay + field - effNow); }
+            if (nowDay < actDay + field) { ok = YES; gLicenseDaysLeft = (int)(actDay + field - nowDay); }
         }
         if (ok) { gLicensed = YES; gLicenseState = 1; gLicenseName = info[@"name"] ?: @""; }
     }
-    if (!gLicensed && effNow < start + 3) {
-        gLicensed = YES;
-        gLicenseState = 0;
-        gTrialDaysLeft = (int)(start + 3 - effNow);
+    static int sLastWritten = -1;
+    if (gLicenseState != sLastWritten) {
+        sLastWritten = gLicenseState;
+        ZUSWriteSharedValue(@"licenseState", @(gLicenseState));
+        ZUSWriteSharedValue(@"licenseName", gLicenseName);
     }
-    ZUSLog(@"bản quyền: %@ (state=%d, dùng thử còn %d ngày, key còn %d ngày)", gLicenseState == 1 ? @"ĐÃ KÍCH HOẠT" : (gLicenseState == 0 ? @"đang dùng thử" : @"HẾT HẠN"), gLicenseState, gTrialDaysLeft, gLicenseDaysLeft);
+    ZUSLog(@"bản quyền: %@ (key còn %d ngày)", gLicensed ? @"ĐÃ KÍCH HOẠT" : @"CHƯA KÍCH HOẠT", gLicenseDaysLeft);
 }
 
 static BOOL ZUSActivateWithKey(NSString *keyStr) {
@@ -445,8 +403,7 @@ static NSString *ZUSLicenseStatusText(void) {
         if (gLicenseDaysLeft < 0) return [NSString stringWithFormat:@"Đã kích hoạt — %@ (vĩnh viễn)", gLicenseName];
         return [NSString stringWithFormat:@"Đã kích hoạt — %@ (còn %d ngày)", gLicenseName, gLicenseDaysLeft];
     }
-    if (gLicenseState == 0) return [NSString stringWithFormat:@"Đang dùng thử — còn %d ngày", gTrialDaysLeft];
-    return @"Đã hết hạn dùng thử — cần key kích hoạt";
+    return @"Chưa kích hoạt — nhập key để sử dụng";
 }
 
 static void ZUSLoadPrefs(void) {
@@ -1632,7 +1589,7 @@ static NSString *ZUSExportProfile(void) {
     NSMutableDictionary *prof = [NSMutableDictionary dictionary];
     for (NSString *k in ZUSAllPrefKeys()) prof[k] = @(ZUSReadBool(k, NO));
     prof[@"_app"] = @"ZUS";
-    prof[@"_version"] = @"1.2.0";
+    prof[@"_version"] = @"1.2.1";
     NSData *json = [NSJSONSerialization dataWithJSONObject:prof options:NSJSONWritingPrettyPrinted error:nil];
     NSString *path = [ZUSDocsPath() stringByAppendingPathComponent:@"ZUS-Profile.json"];
     return [json writeToFile:path atomically:YES] ? path : nil;
@@ -1952,7 +1909,7 @@ static UIImage *ZUSButtonImage(void) {
             @{@"kind": @"switch", @"title": @"Che nội dung khi thoát ra đa nhiệm", @"key": ZUS_KEY_SHIELD, @"def": @NO},
         ]}];
     } else {
-        [secs addObject:@{@"header": @"Bản quyền", @"footer": @"Dùng thử 3 ngày từ lần chạy đầu tiên. Hết hạn thì các chức năng ZUS tự tắt — Zalo vẫn dùng bình thường. Nhập key để kích hoạt tiếp.", @"rows": @[
+        [secs addObject:@{@"header": @"Bản quyền", @"footer": @"Bản dùng thật: chưa nhập key hợp lệ thì mọi chức năng ZUS đều tắt — kể cả trang ZUS trong Cài đặt. Kích hoạt một lần, dùng theo thời hạn của key.", @"rows": @[
             @{@"kind": @"info2", @"title": @"Trạng thái", @"detail": ZUSLicenseStatusText()},
             @{@"kind": @"action", @"title": @"Mã máy — chạm để chép", @"act": @"copycode"},
             @{@"kind": @"action", @"title": @"Nhập key kích hoạt", @"act": @"activate"},
@@ -1972,7 +1929,7 @@ static UIImage *ZUSButtonImage(void) {
         }
         if (!jrows.count) [jrows addObject:@{@"kind": @"info", @"title": @"Hôm nay chưa ghi được lần chặn nào theo đoạn chat (cần trích được mã đoạn chat)."}];
         [secs addObject:@{@"header": @"Nhật ký chặn hôm nay — theo đoạn chat", @"rows": jrows}];
-        [secs addObject:@{@"header": @"", @"footer": @"ZUS 1.2.0 • Thay đổi ăn ngay, không cần mở lại Zalo.", @"rows": @[
+        [secs addObject:@{@"header": @"", @"footer": @"ZUS 1.2.1 • Thay đổi ăn ngay, không cần mở lại Zalo.", @"rows": @[
             @{@"kind": @"switch", @"title": @"Ghi log gỡ lỗi", @"key": ZUS_KEY_DEBUG, @"def": @YES},
         ]}];
     }
@@ -2288,7 +2245,7 @@ static UIImage *ZUSButtonImage(void) {
 // nút đóng bảng vẫn bấm được; Zalo không bị ảnh hưởng gì.
 - (void)zus_updateLicenseVeil {
     UIView *old = [self.view viewWithTag:23199];
-    if (gLicenseState != 2) { [old removeFromSuperview]; return; }
+    if (gLicenseState == 1) { [old removeFromSuperview]; return; }
     if (old) return;
     UIVisualEffectView *veil = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
     veil.tag = 23199;
@@ -2301,7 +2258,7 @@ static UIImage *ZUSButtonImage(void) {
         [veil.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
     ]];
     UILabel *lab = [[UILabel alloc] init];
-    lab.text = @"Đã hết hạn dùng thử";
+    lab.text = @"ZUS chưa kích hoạt";
     lab.font = [UIFont boldSystemFontOfSize:20];
     lab.textAlignment = NSTextAlignmentCenter;
     lab.translatesAutoresizingMaskIntoConstraints = NO;
@@ -2323,9 +2280,9 @@ static UIImage *ZUSButtonImage(void) {
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
     [self zus_updateLicenseVeil];
-    if (gLicenseState == 2) {
+    if (gLicenseState != 1) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.7 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if (gLicenseState == 2) ZUSShowActivationPopup();
+            if (gLicenseState != 1) ZUSShowActivationPopup();
         });
     }
 }
@@ -3082,7 +3039,7 @@ static void ZUSInstallAdDiscovery(void) {
     self.zusMsg.font = [UIFont systemFontOfSize:14];
     self.zusMsg.textColor = [UIColor darkGrayColor];
     self.zusMsg.textAlignment = NSTextAlignmentCenter;
-    self.zusMsg.text = [NSString stringWithFormat:@"Bản dùng thử đã hết hạn.\nMã máy của bạn: %@\nDán key kích hoạt vào ô dưới rồi bấm OK — hoặc bấm Huỷ để thoát ra lấy key.", ZUSDeviceCode()];
+    self.zusMsg.text = [NSString stringWithFormat:@"ZUS chưa được kích hoạt.\nMã máy của bạn: %@\nDán key kích hoạt vào ô dưới rồi bấm OK — hoặc bấm Huỷ để thoát ra lấy key.", ZUSDeviceCode()];
     self.zusField = [[UITextField alloc] init];
     self.zusField.borderStyle = UITextBorderStyleRoundedRect;
     self.zusField.placeholder = @"ZUS1-.....";
@@ -3205,10 +3162,7 @@ static void ZUSShowActivationPopup(void) {
         ZUSInstallCaptureHooks();
         ZUSInstallLinkHooks();
         ZUSInstallAdDiscovery();
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if (gLicenseState == 2) ZUSShowActivationPopup();
-        });
-        ZUSLog(@"ZUS 1.2.0 nạp vào Zalo (bật=%d, unseen=%d, ẩn đang nhập=%d)", gEnabled, gUnseen, gHideTyping);
+        ZUSLog(@"ZUS 1.2.1 nạp vào Zalo (bật=%d, unseen=%d, ẩn đang nhập=%d)", gEnabled, gUnseen, gHideTyping);
         {
             NSDictionary *fp0 = ZUSReadFilePrefs();
             id fe0 = fp0[ZUS_KEY_ENABLED];

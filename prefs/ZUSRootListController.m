@@ -44,7 +44,12 @@ static NSMutableDictionary *ZUSPrefsDict(void) {
 
 - (NSArray *)specifiers {
     if (!_specifiers) {
-        _specifiers = [self loadSpecifiersFromPlistName:@"Root" target:self];
+        // 1.2.1 (bản dùng thật): chưa kích hoạt thì trang này cũng khoá —
+        // tweak ghi đệm licenseState vào file chung mỗi lần đánh giá,
+        // trang chỉ đọc lại verdict đó (không tự kiểm key ở đây).
+        id st = ZUSPrefsDict()[@"licenseState"];
+        BOOL licensed = [st isKindOfClass:[NSNumber class]] && [st intValue] == 1;
+        _specifiers = [self loadSpecifiersFromPlistName:(licensed ? @"Root" : @"RootLocked") target:self];
     }
     return _specifiers;
 }

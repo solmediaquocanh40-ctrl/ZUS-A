@@ -1,4 +1,4 @@
-# ZUS 1.2.0 (gói com.anhdang.zalounseen)
+# ZUS 1.2.1 (gói com.anhdang.zalounseen)
 
 Tweak chích vào Zalo trên máy đã jailbreak: đọc tin nhắn mà bên kia không thấy
 "đã xem" — đoạn chat vẫn giữ chữ đậm như chưa đọc — kèm tắt "đang nhập...",
@@ -30,6 +30,12 @@ chặn "đã nhận", chống thu hồi, ẩn đã xem Story và bộ công cụ
 - Trong Zalo: **ấn giữ thanh tab dưới đáy** (bất kỳ tab nào, ~0,5 giây) mở
   bảng công tắc + mục Danh bạ & hồ sơ + xem trạng thái dò; nút tròn **ZUS**
   ở màn hình chat vẫn còn làm lối vào dự phòng. (1.1.1)
+- **1.2.1 — chuyển sang BẢN DÙNG THẬT (anh chốt)**: bỏ hẳn dùng
+  thử 3 ngày của 1.2.0. Chưa nhập key hợp lệ thì KHÔNG chức năng nào
+  hoạt động; trang ZUS trong Cài đặt iOS cũng khoá theo (hiện trang
+  RootLocked "Chưa kích hoạt" — tweak ghi đệm trạng thái vào file
+  chung cho trang Cài đặt đọc). Popup kích hoạt CHỈ hiện
+  khi mở bảng ZUS (vào Zalo hoàn toàn bình thường, không popup).
 - **1.2.0 — hệ thống bản quyền**: dùng thử 3 ngày từ lần chạy đầu
   (mốc lưu 3 nơi gồm Keychain, chống vặn ngược đồng hồ, gỡ/cài lại
   không reset được). Hết hạn: popup kích hoạt hiện 1 lần mỗi lần mở
