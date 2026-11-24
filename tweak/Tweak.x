@@ -1,4 +1,4 @@
-// ZUS 1.1.2 — đọc tin nhắn Zalo mà bên kia không thấy "đã xem", tắt "đang nhập...".
+// ZUS 1.1.3 — đọc tin nhắn Zalo mà bên kia không thấy "đã xem", tắt "đang nhập...".
 //
 // SỬA GỐC VỤ VĂNG CỦA 1.0.4 (đã chứng minh ở mức lệnh máy từ file .ips và đúng
 // file .deb đã cài): hàm thay thế chung ZUSGenericHook khai tham số kiểu `id`,
@@ -128,6 +128,15 @@ static void ZUSLog(NSString *fmt, ...);
 // ngã về CFPreferences rồi mặc định), ghi thì ghi CẢ HAI nơi cho hai kho
 // hội tụ dần. Kết quả đọc/ghi file đều có log để kiểm chứng trên máy thật.
 static NSString *ZUSSharedPrefsPath(void) {
+    // 1.1.3: tiến trình nằm trong container của Zalo thì file domain nằm
+    // ngay trong container đó — đọc/ghi trực tiếp được, không qua cfprefsd
+    // (1.1.2 đã chứng minh đường /var/mobile bị sandbox chặn cả hai chiều).
+    // Ngoài container thì giữ đường toàn cục.
+    NSString *home = NSHomeDirectory();
+    if ([home containsString:@"/Containers/"]) {
+        return [[[home stringByAppendingPathComponent:@"Library/Preferences"]
+                 stringByAppendingPathComponent:ZUS_DOMAIN] stringByAppendingString:@".plist"];
+    }
     return [@"/var/mobile/Library/Preferences/" stringByAppendingString:[ZUS_DOMAIN stringByAppendingString:@".plist"]];
 }
 static NSDictionary *ZUSReadFilePrefs(void) {
@@ -566,6 +575,46 @@ static const ZUSEntry kZUSWhitelist[] = {
 };
 static const unsigned kZUSWhitelistCount = sizeof(kZUSWhitelist) / sizeof(kZUSWhitelist[0]);
 
+// ===== Cửa seenTime: móc RIÊNG đúng kiểu (1.1.3 bổ sung) =====
+// InboxDataManager.processUpdateStatus…seenTime:… có tham số double nên bộ
+// móc chung bị cổng an toàn từ chối ở mọi bản trước: cửa này không để lại
+// dòng log nào và không bị chặn — đúng triệu chứng "đang mở sẵn đoạn chat,
+// tin mới tới thì bị seen" mà anh gặp. Hàm thay thế khai ĐÚNG chữ ký gốc
+// (double đi qua nguyên vẹn khi chuyển tiếp). Chặn khi nhóm đã-xem đang
+// bật VÀ lần gọi mang mốc seenTime > 0; 10 lần gọi đầu ghi lại giá trị
+// (status/seenTime/UI/DB + quyết định) để đối chiếu trên máy thật.
+typedef void (*ZUSSeenTimeIMP)(__unsafe_unretained id, SEL, __unsafe_unretained id, long long, unsigned long long, double, BOOL, BOOL);
+static ZUSSeenTimeIMP gZUSOrigSeenTime = NULL;
+static int gZUSSeenTimeCalls = 0;
+
+static void ZUSSeenTimeHook(__unsafe_unretained id self, SEL _cmd, __unsafe_unretained id threadId, long long msgType, unsigned long long newStatus, double seenTime, BOOL updateUI, BOOL updateDB) {
+    BOOL block = ZUSActiveForCat(1) && seenTime > 0;
+    if (gZUSSeenTimeCalls < 10) {
+        gZUSSeenTimeCalls++;
+        ZUSLog(@"cửa seenTime gọi lần %d: status=%llu seenTime=%.0f UI=%d DB=%d -> %@", gZUSSeenTimeCalls, newStatus, seenTime, updateUI, updateDB, block ? @"CHẶN" : @"cho qua");
+    }
+    if (block) {
+        ZUSNoteBlocked(self, _cmd, 1);
+        return;
+    }
+    if (gZUSOrigSeenTime) gZUSOrigSeenTime(self, _cmd, threadId, msgType, newStatus, seenTime, updateUI, updateDB);
+}
+
+static void ZUSInstallSeenTimeHook(Class cls, Method m, BOOL isClass) {
+    if (gZUSOrigSeenTime) return;
+    SEL sel = method_getName(m);
+    Class target = isClass ? object_getClass(cls) : cls;
+    void *orig = NULL;
+    MSHookMessageEx(target, sel, (IMP)ZUSSeenTimeHook, (IMP *)&orig);
+    if (!orig) {
+        ZUSLog(@"móc HỎNG: %@ %@", NSStringFromClass(cls), NSStringFromSelector(sel));
+        return;
+    }
+    gZUSOrigSeenTime = (ZUSSeenTimeIMP)orig;
+    gHookedTotal++;
+    ZUSLog(@"đã móc [đã-xem] %@.%@ enc=%s (móc riêng đúng kiểu — có tham số double)", NSStringFromClass(cls), NSStringFromSelector(sel), method_getTypeEncoding(m));
+}
+
 // ---------------- Lắp móc theo danh sách ----------------
 static long gHookedTotal = 0;
 
@@ -606,6 +655,11 @@ static void ZUSInstallWhitelist(void) {
         }
         if ((int)method_getNumberOfArguments(m) - 2 != e->argc) {
             ZUSLog(@"bỏ qua (số tham số khác kỳ vọng): %s.%s", e->cls, e->sel);
+            continue;
+        }
+        if (e->argc == 6 && strcmp(e->cls, "InboxDataManager") == 0 &&
+            strcmp(e->sel, "processUpdateStatusInboxEntityThreadId:msgType:newStatus:seenTime:updateUI:updateDB:") == 0) {
+            ZUSInstallSeenTimeHook(cls, m, isClass);
             continue;
         }
         BOOL safe; IMP repl;
@@ -730,7 +784,7 @@ static void ZUSCheckZaloVersion(void) {
 // luồng đã-xem ở 1.0.5/1.0.6.
 static id ZUSInstanceOf(Class cls) {
     if (!cls) return nil;
-    NSArray *sels = @[@"sharedInstance", @"sharedManager", @"defaultManager", @"shared", @"defaultInstance", @"manager"];
+    NSArray *sels = @[@"sharedInstance", @"sharedManager", @"defaultManager", @"shared", @"defaultInstance", @"manager", @"sharedCoordinator", @"defaultCoordinator", @"coordinator", @"sharedCenter", @"defaultCenter", @"center", @"sharedDataManager", @"dataManager", @"main", @"current"];
     for (NSString *s in sels) {
         SEL sel = sel_registerName(s.UTF8String);
         if (!class_getClassMethod(cls, sel)) continue;
@@ -754,6 +808,110 @@ static NSString *ZUSStringField(id obj, NSArray *keys) {
     return @"";
 }
 
+// ===== Vòng 3: bắt thực thể quản lý bạn bè qua hàm khởi tạo =====
+// Log 1.1.2 đã chứng minh: FriendFlowManager không có accessor tĩnh thường
+// gặp, ChatDataManager không giữ nó qua KVC (quan hệ ngược). Đường tin cậy
+// nhất còn lại: móc các hàm init của FriendFlowManager và MSDataCoordinator
+// ngay từ lúc tweak nạp — Zalo tạo thực thể lúc nào, thực thể được giữ yếu
+// ở đây lúc đó. Các thay thế chỉ gọi bản gốc rồi ghi lại, không đổi hành vi.
+static __weak id gZUSCapFFM = nil;
+static __weak id gZUSCapCoord = nil;
+static BOOL gZUSCapFFMLogged = NO;
+static BOOL gZUSCapCoordLogged = NO;
+
+static void ZUSCaptureInstance(BOOL isFFM, __unsafe_unretained id obj) {
+    if (!obj) return;
+    if (isFFM) {
+        if (gZUSCapFFM != obj) {
+            gZUSCapFFM = obj;
+            if (!gZUSCapFFMLogged) { gZUSCapFFMLogged = YES; ZUSLog(@"danh bạ: đã bắt được thực thể FriendFlowManager qua hàm khởi tạo"); }
+        }
+    } else {
+        if (gZUSCapCoord != obj) {
+            gZUSCapCoord = obj;
+            if (!gZUSCapCoordLogged) { gZUSCapCoordLogged = YES; ZUSLog(@"danh bạ: đã bắt được thực thể MSDataCoordinator qua hàm khởi tạo"); }
+        }
+    }
+}
+
+typedef id (*ZUSInitIMP0)(__unsafe_unretained id, SEL);
+typedef id (*ZUSInitIMP1)(__unsafe_unretained id, SEL, void *);
+static ZUSInitIMP0 gZUSOrigFFMInit0 = NULL;
+static ZUSInitIMP0 gZUSOrigCoordInit0 = NULL;
+static ZUSInitIMP1 gZUSOrigFFMInit1 = NULL;
+static ZUSInitIMP1 gZUSOrigCoordInit1 = NULL;
+
+static id ZUSCapFFMInit0(__unsafe_unretained id self, SEL _cmd) { id r = gZUSOrigFFMInit0 ? gZUSOrigFFMInit0(self, _cmd) : self; ZUSCaptureInstance(YES, r); return r; }
+static id ZUSCapCoordInit0(__unsafe_unretained id self, SEL _cmd) { id r = gZUSOrigCoordInit0 ? gZUSOrigCoordInit0(self, _cmd) : self; ZUSCaptureInstance(NO, r); return r; }
+static id ZUSCapFFMInit1(__unsafe_unretained id self, SEL _cmd, void *a1) { id r = gZUSOrigFFMInit1 ? gZUSOrigFFMInit1(self, _cmd, a1) : self; ZUSCaptureInstance(YES, r); return r; }
+static id ZUSCapCoordInit1(__unsafe_unretained id self, SEL _cmd, void *a1) { id r = gZUSOrigCoordInit1 ? gZUSOrigCoordInit1(self, _cmd, a1) : self; ZUSCaptureInstance(NO, r); return r; }
+
+static void ZUSHookInitsForClass(Class cls, BOOL isFFM) {
+    if (!cls) { ZUSLog(@"danh bạ: không thấy lớp %@ để móc init", isFFM ? @"FriendFlowManager" : @"MSDataCoordinator"); return; }
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(cls, &count);
+    NSMutableArray *names = [NSMutableArray array];
+    BOOL hooked0 = NO, hooked1 = NO;
+    for (unsigned int i = 0; i < count; i++) {
+        SEL sel = method_getName(methods[i]);
+        NSString *name = NSStringFromSelector(sel);
+        if (![name hasPrefix:@"init"]) continue;
+        [names addObject:name];
+        const char *enc = method_getTypeEncoding(methods[i]);
+        if (!enc || (enc[0] != '@' && enc[0] != '#')) continue;
+        if (strchr(enc, '{') || strchr(enc, '(') || strchr(enc, '[')) continue;
+        unsigned nargs = method_getNumberOfArguments(methods[i]);
+        if (nargs == 2 && !hooked0) {
+            if (isFFM) MSHookMessageEx(cls, sel, (IMP)ZUSCapFFMInit0, (IMP *)&gZUSOrigFFMInit0);
+            else MSHookMessageEx(cls, sel, (IMP)ZUSCapCoordInit0, (IMP *)&gZUSOrigCoordInit0);
+            hooked0 = YES;
+        } else if (nargs == 3 && !hooked1) {
+            if (isFFM) MSHookMessageEx(cls, sel, (IMP)ZUSCapFFMInit1, (IMP *)&gZUSOrigFFMInit1);
+            else MSHookMessageEx(cls, sel, (IMP)ZUSCapCoordInit1, (IMP *)&gZUSOrigCoordInit1);
+            hooked1 = YES;
+        }
+    }
+    if (methods) free(methods);
+    if (!hooked0 && !names.count) {
+        // Lớp không khai init riêng: móc -init thừa kế, chỉ áp cho lớp này.
+        SEL sel = @selector(init);
+        if (isFFM) { MSHookMessageEx(cls, sel, (IMP)ZUSCapFFMInit0, (IMP *)&gZUSOrigFFMInit0); hooked0 = YES; }
+        else { MSHookMessageEx(cls, sel, (IMP)ZUSCapCoordInit0, (IMP *)&gZUSOrigCoordInit0); hooked0 = YES; }
+    }
+    ZUSLog(@"danh bạ: %@ — các hàm init: %@; đã móc bắt thực thể: %@",
+           NSStringFromClass(cls),
+           names.count ? [names componentsJoinedByString:@", "] : @"(không có init riêng)",
+           (hooked0 || hooked1) ? @"có" : @"không");
+}
+
+static void ZUSInstallCaptureHooks(void) {
+    ZUSHookInitsForClass(objc_getClass("FriendFlowManager"), YES);
+    ZUSHookInitsForClass(objc_getClass("MSDataCoordinator"), NO);
+}
+
+// Dump tên + lớp của các thuộc tính CÓ giá trị của một thực thể (mỗi lớp một
+// lần) — để tìm khoá giữ FriendFlowManager bên trong MSDataCoordinator.
+static void ZUSDiagDumpProperties(__unsafe_unretained id obj, NSString *label) {
+    if (!obj) return;
+    static NSMutableSet *done = nil;
+    if (!done) done = [NSMutableSet set];
+    NSString *cn = NSStringFromClass([obj class]);
+    if ([done containsObject:cn]) return;
+    [done addObject:cn];
+    unsigned int count = 0;
+    objc_property_t *props = class_copyPropertyList([obj class], &count);
+    NSMutableArray *parts = [NSMutableArray array];
+    for (unsigned int i = 0; i < count; i++) {
+        NSString *pn = @(property_getName(props[i]));
+        id v = nil;
+        @try { v = [obj valueForKey:pn]; } @catch (NSException *e) {}
+        if (v) [parts addObject:[NSString stringWithFormat:@"%@=%@", pn, NSStringFromClass([v class])]];
+        if (parts.count >= 40) break;
+    }
+    if (props) free(props);
+    ZUSLog(@"danh bạ: thuộc tính có giá trị của %@: %@", label, [parts componentsJoinedByString:@", "]);
+}
+
 static NSDictionary *ZUSFriendDict(id f) {
     NSString *name = ZUSStringField(f, @[@"displayName", @"name", @"fullName", @"zaloName", @"username"]);
     NSString *fid  = ZUSStringField(f, @[@"userId", @"uid", @"zaloId", @"userID", @"friendId", @"id"]);
@@ -764,7 +922,7 @@ static NSDictionary *ZUSFriendDict(id f) {
 
 static NSArray *ZUSFriendsFromManager(id inst, NSString *srcName) {
     if (!inst) return nil;
-    NSArray *listSels = @[@"cloneFriendList", @"friendList", @"allFriends", @"friends", @"getFriendList", @"getAllFriends", @"listFriends", @"getFriends", @"friendArray", @"allContacts", @"contacts"];
+    NSArray *listSels = @[@"cloneFriendList", @"copySortedFriendsArray", @"copySortedNonBlockedFriendsArray", @"copyNonBlockedFriendsDictionary", @"copyZaloContactNewFriendDictionary", @"nonBlockedFriendSortedArray", @"getNewFriendArray", @"friendList", @"allFriends", @"friends", @"getFriendList", @"getAllFriends", @"listFriends", @"getFriends", @"friendArray", @"allContacts", @"contacts"];
     for (NSString *sn in listSels) {
         SEL sel = sel_registerName(sn.UTF8String);
         if (![inst respondsToSelector:sel]) continue;
@@ -773,7 +931,15 @@ static NSArray *ZUSFriendsFromManager(id inst, NSString *srcName) {
             NSArray *arr = nil;
             if ([r isKindOfClass:[NSArray class]]) arr = r;
             else if ([r isKindOfClass:[NSSet class]]) arr = [(NSSet *)r allObjects];
-            else if ([r isKindOfClass:[NSDictionary class]]) arr = [(NSDictionary *)r allValues];
+            else if ([r isKindOfClass:[NSDictionary class]]) {
+                NSMutableArray *flat = [NSMutableArray array];
+                for (id v in [(NSDictionary *)r allValues]) {
+                    if ([v isKindOfClass:[NSArray class]]) [flat addObjectsFromArray:v];
+                    else if ([v isKindOfClass:[NSSet class]]) [flat addObjectsFromArray:[(NSSet *)v allObjects]];
+                    else [flat addObject:v];
+                }
+                arr = flat;
+            }
             if (arr.count) {
                 ZUSLog(@"danh bạ: lấy được %lu bạn từ %@.%@", (unsigned long)arr.count, srcName, sn);
                 ZUSWriteSharedValue(ZUS_DIAG_FRIENDSRC, [NSString stringWithFormat:@"%@.%@", srcName, sn]);
@@ -786,9 +952,39 @@ static NSArray *ZUSFriendsFromManager(id inst, NSString *srcName) {
 }
 
 static NSArray *ZUSCollectFriends(void) {
-    // Vòng 2 (1.1.1): log của 1.1.0 đã chỉ đúng nguồn — FriendFlowManager có
-    // cloneFriendList (trả thẳng danh sách, đồng bộ) và ChatDataManager giữ
-    // nó qua thuộc tính friendFlowManager. Bám hai đường đó trước tiên.
+    // Vòng 3 (1.1.3): bám thực thể BẮT ĐƯỢC qua init trước (tin cậy nhất),
+    // rồi accessor tĩnh nới rộng, rồi MSDataCoordinator (dump thuộc tính +
+    // KVC nhiều khoá), cuối cùng mới là các đường cũ của vòng 1–2.
+    Class ffmCls = objc_getClass("FriendFlowManager");
+    if (gZUSCapFFM) {
+        NSArray *r = ZUSFriendsFromManager(gZUSCapFFM, @"FriendFlowManager(bắt qua init)");
+        if (r) return r;
+    }
+    if (ffmCls) {
+        id inst = ZUSInstanceOf(ffmCls);
+        if (inst) {
+            NSArray *r = ZUSFriendsFromManager(inst, @"FriendFlowManager");
+            if (r) return r;
+        } else {
+            ZUSLog(@"danh bạ: không lấy được thực thể FriendFlowManager qua các hàm shared thường gặp");
+        }
+    }
+    Class coordCls = objc_getClass("MSDataCoordinator");
+    id coord = gZUSCapCoord;
+    if (!coord && coordCls) coord = ZUSInstanceOf(coordCls);
+    if (coord) {
+        ZUSDiagDumpProperties(coord, @"MSDataCoordinator");
+        for (NSString *key in @[@"friendFlowManager", @"friendManager", @"friendFlowMgr", @"friendMgr", @"flowManager", @"friendFlow", @"ffManager", @"friendsManager"]) {
+            id sub = nil;
+            @try { sub = [coord valueForKey:key]; } @catch (NSException *e) {}
+            if (sub) {
+                NSArray *r = ZUSFriendsFromManager(sub, [@"MSDataCoordinator." stringByAppendingString:key]);
+                if (r) return r;
+            }
+        }
+        NSArray *r = ZUSFriendsFromManager(coord, @"MSDataCoordinator");
+        if (r) return r;
+    }
     for (NSString *hostName in @[@"ChatDataManager", @"MSDataCoordinator"]) {
         Class hostCls = objc_getClass(hostName.UTF8String);
         if (!hostCls) continue;
@@ -802,16 +998,6 @@ static NSArray *ZUSCollectFriends(void) {
             if (r) return r;
         } else {
             ZUSLog(@"danh bạ: %@ không lộ friendFlowManager qua KVC", hostName);
-        }
-    }
-    {
-        Class cls = objc_getClass("FriendFlowManager");
-        id inst = cls ? ZUSInstanceOf(cls) : nil;
-        if (inst) {
-            NSArray *r = ZUSFriendsFromManager(inst, @"FriendFlowManager");
-            if (r) return r;
-        } else {
-            ZUSLog(@"danh bạ: không lấy được thực thể FriendFlowManager qua các hàm shared thường gặp");
         }
     }
     // Dự phòng: quét chung các lớp quản lý như vòng 1.
@@ -836,6 +1022,16 @@ static NSArray *ZUSCollectFriends(void) {
         }
         free(list);
         if (names.count) ZUSLog(@"danh bạ: %@ có các hàm friend: %@", cn, [names componentsJoinedByString:@", "]);
+    }
+    // Bản đồ hàm LỚP (nơi accessor tĩnh thật sự sống) của hai lớp trọng điểm.
+    for (NSString *cn in @[@"FriendFlowManager", @"MSDataCoordinator"]) {
+        Class cls = objc_getClass(cn.UTF8String);
+        if (!cls) continue;
+        unsigned n = 0; Method *list = class_copyMethodList(object_getClass(cls), &n);
+        NSMutableArray *names = [NSMutableArray array];
+        for (unsigned i = 0; i < n; i++) [names addObject:NSStringFromSelector(method_getName(list[i]))];
+        free(list);
+        if (names.count) ZUSLog(@"danh bạ: hàm lớp của %@: %@", cn, [names componentsJoinedByString:@", "]);
     }
     return nil;
 }
@@ -963,7 +1159,7 @@ static NSString *ZUSExportProfile(void) {
     NSMutableDictionary *prof = [NSMutableDictionary dictionary];
     for (NSString *k in ZUSAllPrefKeys()) prof[k] = @(ZUSReadBool(k, NO));
     prof[@"_app"] = @"ZUS";
-    prof[@"_version"] = @"1.1.2";
+    prof[@"_version"] = @"1.1.3";
     NSData *json = [NSJSONSerialization dataWithJSONObject:prof options:NSJSONWritingPrettyPrinted error:nil];
     NSString *path = [ZUSDocsPath() stringByAppendingPathComponent:@"ZUS-Profile.json"];
     return [json writeToFile:path atomically:YES] ? path : nil;
@@ -1089,7 +1285,7 @@ static id ZUSDiagRead(NSString *key) {
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
-    return section == 2 ? @"ZUS 1.1.2 • Thay đổi ăn ngay, không cần mở lại Zalo." : nil;
+    return section == 2 ? @"ZUS 1.1.3 • Thay đổi ăn ngay, không cần mở lại Zalo." : nil;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -1345,7 +1541,8 @@ static void ZUSInstallTabBarGesture(void) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, ZUSPrefsChanged,
                                         ZUS_NOTIFY, NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         ZUSInstallShieldObservers();
-        ZUSLog(@"ZUS 1.1.2 nạp vào Zalo (bật=%d, unseen=%d, ẩn đang nhập=%d)", gEnabled, gUnseen, gHideTyping);
+        ZUSInstallCaptureHooks();
+        ZUSLog(@"ZUS 1.1.3 nạp vào Zalo (bật=%d, unseen=%d, ẩn đang nhập=%d)", gEnabled, gUnseen, gHideTyping);
         {
             NSDictionary *fp0 = ZUSReadFilePrefs();
             id fe0 = fp0[ZUS_KEY_ENABLED];

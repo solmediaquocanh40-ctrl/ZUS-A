@@ -1,4 +1,4 @@
-# ZUS 1.1.2 (gói com.anhdang.zalounseen)
+# ZUS 1.1.3 (gói com.anhdang.zalounseen)
 
 Tweak chích vào Zalo trên máy đã jailbreak: đọc tin nhắn mà bên kia không thấy
 "đã xem" — đoạn chat vẫn giữ chữ đậm như chưa đọc — kèm tắt "đang nhập...",
@@ -30,6 +30,20 @@ chặn "đã nhận", chống thu hồi, ẩn đã xem Story và bộ công cụ
 - Trong Zalo: **ấn giữ thanh tab dưới đáy** (bất kỳ tab nào, ~0,5 giây) mở
   bảng công tắc + mục Danh bạ & hồ sơ + xem trạng thái dò; nút tròn **ZUS**
   ở màn hình chat vẫn còn làm lối vào dự phòng. (1.1.1)
+- **1.1.3 — hợp nhất kho cài đặt qua container + danh bạ vòng 3**: trang Cài
+  đặt tự tìm file domain trong container của Zalo và đọc/ghi thẳng vào đó
+  (hai điểm ghi đè chuẩn của PSListController), soi gương sang kho toàn cục
+  và bắn thông báo để tweak nạp lại ngay; phía tweak cũng ưu tiên đọc/ghi
+  file ngay trong container của mình (đường /var/mobile bị sandbox chặn —
+  log 1.1.2 đã chứng minh). Danh bạ: móc các hàm init của FriendFlowManager
+  và MSDataCoordinator để bắt thực thể ngay khi Zalo tạo ra, dump thuộc
+  tính của coordinator, thêm các selector trả danh sách mà bản đồ đã lộ
+  (copySortedFriendsArray, copyNonBlockedFriendsDictionary...). Bổ sung
+  cùng bản: móc riêng đúng kiểu cho cửa seenTime của InboxDataManager —
+  cửa duy nhất bị cổng an toàn từ chối ở mọi bản trước vì tham số double,
+  nghi phạm của lỗi "đang mở chat, tin mới tới thì bị seen"; chặn khi nhóm
+  đã-xem bật và lần gọi mang seenTime > 0, 10 lần gọi đầu ghi lại giá trị
+  để đối chiếu.
 - **1.1.2 — chữa lỗi hai kho cài đặt**: tweak đọc/ghi thẳng file prefs chung
   `/var/mobile/Library/Preferences/com.anhdang.zalounseen.plist` (đọc file
   trước, ghi cả hai kho) nên gạt trong Zalo và trong Cài đặt của máy từ nay

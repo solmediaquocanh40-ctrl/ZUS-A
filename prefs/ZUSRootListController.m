@@ -1,6 +1,40 @@
-// ZUSRootListController 1.1.2 — trang Cài đặt của ZaloUnseen.
+// ZUSRootListController 1.1.3 — trang Cài đặt của ZaloUnseen.
+// 1.1.3: BẮC CẦU VÀO CONTAINER CỦA ZALO. Bài học 1.1.1–1.1.2: CFPreferences
+// từ trong Zalo rơi vào kho container của Zalo, còn trang Cài đặt mặc định
+// ghi kho toàn cục /var/mobile — hai kho không bao giờ gặp nhau, và từ
+// trong Zalo thì file toàn cục bị sandbox chặn cả đọc lẫn ghi. Trang Cài
+// đặt chạy ở tiến trình Preferences (quyền file rộng) nên nó TỰ TÌM file
+// domain nằm trong container của Zalo và đọc/ghi thẳng vào đó qua hai
+// điểm ghi đè chuẩn của PSListController. Mọi công tắc từ nay tác động
+// đúng kho mà tweak đọc.
 #import "ZUSRootListController.h"
 #import "ZUSShared.h"
+
+// Tìm file plist của domain ZUS bên trong container dữ liệu của Zalo.
+// File này chỉ tồn tại trong container của Zalo (do chính tweak tạo qua
+// CFPreferences) nên tìm thấy là trúng. Không thấy (Zalo chưa từng chạy
+// cùng tweak) thì ngã về đường toàn cục như cũ.
+static NSString *ZUSPrefsFilePath(void) {
+    static NSString *cached = nil;
+    if (cached) return cached;
+    NSString *rel = @"Library/Preferences/com.anhdang.zalounseen.plist";
+    NSString *base = @"/var/mobile/Containers/Data/Application";
+    NSArray *dirs = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:base error:nil];
+    for (NSString *d in dirs) {
+        NSString *p = [[base stringByAppendingPathComponent:d] stringByAppendingPathComponent:rel];
+        if ([[NSFileManager defaultManager] fileExistsAtPath:p]) {
+            cached = [p copy];
+            return cached;
+        }
+    }
+    cached = @"/var/mobile/Library/Preferences/com.anhdang.zalounseen.plist";
+    return cached;
+}
+
+static NSMutableDictionary *ZUSPrefsDict(void) {
+    NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:ZUSPrefsFilePath()];
+    return d ? [d mutableCopy] : [NSMutableDictionary dictionary];
+}
 
 @implementation ZUSRootListController
 
@@ -11,9 +45,38 @@
     return _specifiers;
 }
 
+// Đọc: file container trước, rồi kho toàn cục (gương), rồi mặc định của
+// specifier (qua super).
+- (id)readPreferenceValue:(PSSpecifier *)specifier {
+    NSString *key = [specifier propertyForKey:@"key"];
+    if (!key) return [super readPreferenceValue:specifier];
+    id v = ZUSPrefsDict()[key];
+    if (v) return v;
+    CFPropertyListRef g = CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)ZUS_DOMAIN);
+    if (g) return (__bridge_transfer id)g;
+    return [super readPreferenceValue:specifier];
+}
+
+// Ghi: thẳng vào file container + soi gương sang kho toàn cục + bắn thông
+// báo Darwin để tweak nạp lại cài đặt ngay.
+- (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
+    NSString *key = [specifier propertyForKey:@"key"];
+    if (!key) { [super setPreferenceValue:value specifier:specifier]; return; }
+    NSMutableDictionary *d = ZUSPrefsDict();
+    if (value) d[key] = value; else [d removeObjectForKey:key];
+    [d writeToFile:ZUSPrefsFilePath() atomically:YES];
+    CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)value, (__bridge CFStringRef)ZUS_DOMAIN);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)ZUS_DOMAIN);
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("com.anhdang.zalounseen/prefsChanged"),
+                                         NULL, NULL, true);
+}
+
 static id ZUSDiagValue(NSString *key) {
-    CFPropertyListRef v = CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)ZUS_DOMAIN);
-    return (__bridge_transfer id)v;
+    id v = ZUSPrefsDict()[key];
+    if (v) return v;
+    CFPropertyListRef g = CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)ZUS_DOMAIN);
+    return (__bridge_transfer id)g;
 }
 
 - (void)showDiag {
@@ -36,7 +99,7 @@ static id ZUSDiagValue(NSString *key) {
             msg = [NSString stringWithFormat:
                 @"Tweak ĐÃ nạp vào Zalo lúc %@ nhưng chưa quét được dữ liệu.\n\nMở app Zalo, vào một đoạn chat bất kỳ, đợi vài giây rồi quay lại đây kiểm tra.", ctor];
         } else {
-            msg = @"Tweak CHƯA từng nạp vào Zalo (không có mốc nạp).\n\nMở app Zalo một lúc rồi quay lại đây kiểm tra. Nếu vẫn trống thì gửi mình file log trong Documents của Zalo (Filza → Apps → Zalo → Documents → ZaloUnseen.log).";
+            msg = @"Tweak CHƯA từng nạp vào Zalo (không có mốc nạp).\n\nMở app Zalo một lúc rồi quay lại đây kiểm tra. Nếu vẫn trống thì gửi mình file log trong Documents của Zalo (Filza → Apps → Zalo → Documents → ZUS.log).";
         }
     } else {
         msg = [NSString stringWithFormat:
