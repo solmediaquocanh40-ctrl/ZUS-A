@@ -37,6 +37,8 @@
 #define ZUS_KEY_LINKWARN  @"linkWarning"
 #define ZUS_KEY_ADBLOCK   @"adBlock"
 #define ZUS_KEY_VAULT     @"recallVault"
+#define ZUS_KEY_LICENSE   @"licenseKey"
+
 
 
 

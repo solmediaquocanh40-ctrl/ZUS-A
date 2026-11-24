@@ -4,7 +4,7 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = ZUS
 ZUS_FILES = Tweak.x
-ZUS_FRAMEWORKS = UIKit Foundation LocalAuthentication Photos
+ZUS_FRAMEWORKS = UIKit Foundation LocalAuthentication Photos Security
 ZUS_LIBRARIES = substrate
 ZUS_CFLAGS = -fobjc-arc
 
