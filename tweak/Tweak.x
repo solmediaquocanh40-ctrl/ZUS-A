@@ -1,4 +1,4 @@
-// ZUS 1.2.1 — đọc tin nhắn Zalo mà bên kia không thấy "đã xem", tắt "đang nhập...".
+// ZUS 1.2.2 — đọc tin nhắn Zalo mà bên kia không thấy "đã xem", tắt "đang nhập...".
 //
 // SỬA GỐC VỤ VĂNG CỦA 1.0.4 (đã chứng minh ở mức lệnh máy từ file .ips và đúng
 // file .deb đã cài): hàm thay thế chung ZUSGenericHook khai tham số kiểu `id`,
@@ -250,6 +250,37 @@ static NSData *ZUSBase32Decode(NSString *str) {
     return out;
 }
 
+
+// SecKeyVerifySignature voi thuat toan ...X962... doi chu ky o dinh
+// dang X9.62 = DER (SEQUENCE cua 2 INTEGER), KHONG phai raw r||s.
+// Key cua ZUS luu chu ky raw 64 byte nen phai chuyen truoc khi kiem.
+static NSData *ZUSRawSigToDER(NSData *sig) {
+    if (sig.length != 64) return nil;
+    const unsigned char *b = sig.bytes;
+    int rOff = 0;
+    while (rOff < 31 && b[rOff] == 0) rOff++;
+    int sOff = 0;
+    while (sOff < 31 && b[32 + sOff] == 0) sOff++;
+    int rLen = 32 - rOff, sLen = 32 - sOff;
+    BOOL rPad = (b[rOff] & 0x80) != 0;
+    BOOL sPad = (b[32 + sOff] & 0x80) != 0;
+    int rIntLen = rLen + (rPad ? 1 : 0);
+    int sIntLen = sLen + (sPad ? 1 : 0);
+    int total = 2 + rIntLen + 2 + sIntLen;
+    NSMutableData *der = [NSMutableData data];
+    unsigned char hdr[2] = {0x30, (unsigned char)total};
+    [der appendBytes:hdr length:2];
+    unsigned char ih[2] = {0x02, (unsigned char)rIntLen};
+    [der appendBytes:ih length:2];
+    if (rPad) { unsigned char z = 0; [der appendBytes:&z length:1]; }
+    [der appendBytes:b + rOff length:(NSUInteger)rLen];
+    ih[1] = (unsigned char)sIntLen;
+    [der appendBytes:ih length:2];
+    if (sPad) { unsigned char z = 0; [der appendBytes:&z length:1]; }
+    [der appendBytes:b + 32 + sOff length:(NSUInteger)sLen];
+    return der;
+}
+
 static NSDictionary *ZUSVerifyLicenseKey(NSString *keyStr) {
     if (!keyStr) return nil;
     NSString *clean = [[[keyStr uppercaseString] stringByReplacingOccurrencesOfString:@"-" withString:@""] stringByReplacingOccurrencesOfString:@" " withString:@""];
@@ -264,10 +295,11 @@ static NSDictionary *ZUSVerifyLicenseKey(NSString *keyStr) {
                             (__bridge id)kSecAttrKeyClass: (__bridge id)kSecAttrKeyClassPublic,
                             (__bridge id)kSecAttrKeySizeInBits: @256};
     SecKeyRef pub = SecKeyCreateWithData((__bridge CFDataRef)pubData, (__bridge CFDictionaryRef)attrs, NULL);
-    if (!pub) return nil;
-    BOOL ok = SecKeyVerifySignature(pub, kSecKeyAlgorithmECDSASignatureMessageX962SHA256, (__bridge CFDataRef)payload, (__bridge CFDataRef)sig, NULL);
+    if (!pub) { ZUSLog(@"bản quyền: tạo khoá công khai thất bại"); return nil; }
+    NSData *sigDER = ZUSRawSigToDER(sig);
+    BOOL ok = sigDER && SecKeyVerifySignature(pub, kSecKeyAlgorithmECDSASignatureMessageX962SHA256, (__bridge CFDataRef)payload, (__bridge CFDataRef)sigDER, NULL);
     CFRelease(pub);
-    if (!ok) return nil;
+    if (!ok) { ZUSLog(@"bản quyền: chữ ký key KHÔNG khớp"); return nil; }
     const unsigned char *b = payload.bytes;
     int ver = b[0], kind = b[1];
     if (ver != 1 || kind == 2) return nil;
@@ -1589,7 +1621,7 @@ static NSString *ZUSExportProfile(void) {
     NSMutableDictionary *prof = [NSMutableDictionary dictionary];
     for (NSString *k in ZUSAllPrefKeys()) prof[k] = @(ZUSReadBool(k, NO));
     prof[@"_app"] = @"ZUS";
-    prof[@"_version"] = @"1.2.1";
+    prof[@"_version"] = @"1.2.2";
     NSData *json = [NSJSONSerialization dataWithJSONObject:prof options:NSJSONWritingPrettyPrinted error:nil];
     NSString *path = [ZUSDocsPath() stringByAppendingPathComponent:@"ZUS-Profile.json"];
     return [json writeToFile:path atomically:YES] ? path : nil;
@@ -1929,7 +1961,7 @@ static UIImage *ZUSButtonImage(void) {
         }
         if (!jrows.count) [jrows addObject:@{@"kind": @"info", @"title": @"Hôm nay chưa ghi được lần chặn nào theo đoạn chat (cần trích được mã đoạn chat)."}];
         [secs addObject:@{@"header": @"Nhật ký chặn hôm nay — theo đoạn chat", @"rows": jrows}];
-        [secs addObject:@{@"header": @"", @"footer": @"ZUS 1.2.1 • Thay đổi ăn ngay, không cần mở lại Zalo.", @"rows": @[
+        [secs addObject:@{@"header": @"", @"footer": @"ZUS 1.2.2 • Thay đổi ăn ngay, không cần mở lại Zalo.", @"rows": @[
             @{@"kind": @"switch", @"title": @"Ghi log gỡ lỗi", @"key": ZUS_KEY_DEBUG, @"def": @YES},
         ]}];
     }
@@ -3013,6 +3045,8 @@ static void ZUSInstallAdDiscovery(void) {
 @property (nonatomic, strong) UILabel *zusCount;
 @property (nonatomic, strong) NSTimer *zusTimer;
 @property (nonatomic) int zusLeft;
+@property (nonatomic, strong) UIView *zusCard;
+@property (nonatomic, strong) NSLayoutConstraint *zusCardCenterY;
 @end
 
 @implementation ZUSLicenseController
@@ -3025,9 +3059,11 @@ static void ZUSInstallAdDiscovery(void) {
     card.layer.cornerRadius = 16;
     card.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:card];
+    self.zusCard = card;
+    self.zusCardCenterY = [card.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor];
     [NSLayoutConstraint activateConstraints:@[
         [card.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
-        [card.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor],
+        self.zusCardCenterY,
         [card.widthAnchor constraintEqualToConstant:324],
     ]];
     UILabel *title = [[UILabel alloc] init];
@@ -3081,6 +3117,33 @@ static void ZUSInstallAdDiscovery(void) {
     ]];
     self.zusLeft = 30;
     self.zusTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 target:self selector:@selector(zus_tick) userInfo:nil repeats:YES];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(zus_kbShow:) name:UIKeyboardWillShowNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(zus_kbHide:) name:UIKeyboardWillHideNotification object:nil];
+}
+
+// Bàn phím hiện lên thì tự nâng thẻ popup lên đủ cao để ô dán key và
+// nút OK/Huỷ luôn nằm trên bàn phím (lỗi anh chụp ở 1.2.1: bàn phím che
+// mất nửa dưới popup). Bàn phím hạ xuống thì thẻ về giữa như cũ.
+- (void)zus_kbShow:(NSNotification *)n {
+    CGRect kb = [n.userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
+    CGRect kbInView = [self.view convertRect:kb fromView:nil];
+    [self.view layoutIfNeeded];
+    CGFloat cardBottomAtZero = CGRectGetMaxY(self.zusCard.frame) - self.zusCardCenterY.constant;
+    CGFloat shift = cardBottomAtZero - (kbInView.origin.y - 12);
+    if (shift < 0) shift = 0;
+    double dur = [n.userInfo[UIKeyboardAnimationDurationUserInfoKey] doubleValue];
+    [UIView animateWithDuration:dur animations:^{
+        self.zusCardCenterY.constant = -shift;
+        [self.view layoutIfNeeded];
+    }];
+}
+
+- (void)zus_kbHide:(NSNotification *)n {
+    double dur = [n.userInfo[UIKeyboardAnimationDurationUserInfoKey] doubleValue];
+    [UIView animateWithDuration:dur animations:^{
+        self.zusCardCenterY.constant = 0;
+        [self.view layoutIfNeeded];
+    }];
 }
 
 - (void)zus_tick {
@@ -3162,7 +3225,7 @@ static void ZUSShowActivationPopup(void) {
         ZUSInstallCaptureHooks();
         ZUSInstallLinkHooks();
         ZUSInstallAdDiscovery();
-        ZUSLog(@"ZUS 1.2.1 nạp vào Zalo (bật=%d, unseen=%d, ẩn đang nhập=%d)", gEnabled, gUnseen, gHideTyping);
+        ZUSLog(@"ZUS 1.2.2 nạp vào Zalo (bật=%d, unseen=%d, ẩn đang nhập=%d)", gEnabled, gUnseen, gHideTyping);
         {
             NSDictionary *fp0 = ZUSReadFilePrefs();
             id fe0 = fp0[ZUS_KEY_ENABLED];
