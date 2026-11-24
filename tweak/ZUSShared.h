@@ -21,6 +21,21 @@
 #define ZUS_KEY_STORYDL   @"storyDownload"
 #define ZUS_KEY_SHIELD    @"privacyShield"
 #define ZUS_KEY_ZALOVER   @"lastZaloVersion"
+// 1.1.5: lịch giờ, giao diện, cài riêng theo đoạn chat, khoá đoạn chat,
+// nhật ký chặn theo đoạn chat, cảnh báo link.
+#define ZUS_KEY_SCHED     @"schedEnabled"
+#define ZUS_KEY_SCHEDFROM @"schedFromMin"
+#define ZUS_KEY_SCHEDTO   @"schedToMin"
+#define ZUS_KEY_THEME     @"themePreset"
+#define ZUS_KEY_COLBG     @"colBg"
+#define ZUS_KEY_COLBAR    @"colBar"
+#define ZUS_KEY_COLTEXT   @"colText"
+#define ZUS_KEY_COLACCENT @"colAccent"
+#define ZUS_KEY_PERCHAT   @"perChat"
+#define ZUS_KEY_LOCKED    @"lockedChats"
+#define ZUS_KEY_JOURNAL   @"journal"
+#define ZUS_KEY_LINKWARN  @"linkWarning"
+
 
 // Khoá chẩn đoán: tweak ghi, trang Cài đặt đọc để hiện trạng thái dò.
 #define ZUS_DIAG_CANDIDATES   @"diag_candidates"
