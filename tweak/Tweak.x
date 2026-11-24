@@ -198,6 +198,7 @@ static int gLicenseDaysLeft = -1;
 static void ZUSShowActivationPopup(void);
 static void ZUSDismissActivationPopup(void);
 static NSString *ZUSDeviceCode(void);
+static NSString *ZUSReadString(NSString *key);
 static NSDictionary *gPerChat = nil;
 static NSDictionary *gLockedChats = nil;
 static NSMutableDictionary *gJournal = nil;
