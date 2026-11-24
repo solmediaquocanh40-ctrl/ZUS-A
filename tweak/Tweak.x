@@ -1,4 +1,4 @@
-// ZUS 1.1.7 — đọc tin nhắn Zalo mà bên kia không thấy "đã xem", tắt "đang nhập...".
+// ZUS 1.1.8 — đọc tin nhắn Zalo mà bên kia không thấy "đã xem", tắt "đang nhập...".
 //
 // SỬA GỐC VỤ VĂNG CỦA 1.0.4 (đã chứng minh ở mức lệnh máy từ file .ips và đúng
 // file .deb đã cài): hàm thay thế chung ZUSGenericHook khai tham số kiểu `id`,
@@ -1388,7 +1388,7 @@ static NSString *ZUSExportProfile(void) {
     NSMutableDictionary *prof = [NSMutableDictionary dictionary];
     for (NSString *k in ZUSAllPrefKeys()) prof[k] = @(ZUSReadBool(k, NO));
     prof[@"_app"] = @"ZUS";
-    prof[@"_version"] = @"1.1.7";
+    prof[@"_version"] = @"1.1.8";
     NSData *json = [NSJSONSerialization dataWithJSONObject:prof options:NSJSONWritingPrettyPrinted error:nil];
     NSString *path = [ZUSDocsPath() stringByAppendingPathComponent:@"ZUS-Profile.json"];
     return [json writeToFile:path atomically:YES] ? path : nil;
@@ -1720,7 +1720,7 @@ static UIImage *ZUSButtonImage(void) {
         }
         if (!jrows.count) [jrows addObject:@{@"kind": @"info", @"title": @"Hôm nay chưa ghi được lần chặn nào theo đoạn chat (cần trích được mã đoạn chat)."}];
         [secs addObject:@{@"header": @"Nhật ký chặn hôm nay — theo đoạn chat", @"rows": jrows}];
-        [secs addObject:@{@"header": @"", @"footer": @"ZUS 1.1.7 • Thay đổi ăn ngay, không cần mở lại Zalo.", @"rows": @[
+        [secs addObject:@{@"header": @"", @"footer": @"ZUS 1.1.8 • Thay đổi ăn ngay, không cần mở lại Zalo.", @"rows": @[
             @{@"kind": @"switch", @"title": @"Ghi log gỡ lỗi", @"key": ZUS_KEY_DEBUG, @"def": @YES},
         ]}];
     }
@@ -1770,6 +1770,13 @@ static UIImage *ZUSButtonImage(void) {
         seg.tag = (indexPath.section << 8) | indexPath.row;
         id v = gPerChat[gZUSCurrentThreadID][ZUSCatKey([row[@"cat"] intValue])];
         seg.selectedSegmentIndex = [v isKindOfClass:[NSNumber class]] ? ([v intValue] == 1 ? 1 : 2) : 0;
+        // 1.1.8: nhuộm trạng thái chọn của nút phân đoạn — bản cũ để mặc
+        // định hệ thống (xám trắng) nên nút đang chọn chìm hẳn, không
+        // phân biệt được chọn/chưa (anh phản ánh từ ảnh chụp 1.1.7).
+        seg.selectedSegmentTintColor = t[@"accent"];
+        seg.backgroundColor = [t[@"text"] colorWithAlphaComponent:0.08];
+        [seg setTitleTextAttributes:@{NSForegroundColorAttributeName: [UIColor whiteColor], NSFontAttributeName: [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold]} forState:UIControlStateSelected];
+        [seg setTitleTextAttributes:@{NSForegroundColorAttributeName: t[@"text"]} forState:UIControlStateNormal];
         [seg addTarget:self action:@selector(zu_triChanged:) forControlEvents:UIControlEventValueChanged];
         cell.accessoryView = seg;
     } else if ([kind isEqualToString:@"time"]) {
@@ -2751,7 +2758,7 @@ static void ZUSInstallAdDiscovery(void) {
         ZUSInstallCaptureHooks();
         ZUSInstallLinkHooks();
         ZUSInstallAdDiscovery();
-        ZUSLog(@"ZUS 1.1.7 nạp vào Zalo (bật=%d, unseen=%d, ẩn đang nhập=%d)", gEnabled, gUnseen, gHideTyping);
+        ZUSLog(@"ZUS 1.1.8 nạp vào Zalo (bật=%d, unseen=%d, ẩn đang nhập=%d)", gEnabled, gUnseen, gHideTyping);
         {
             NSDictionary *fp0 = ZUSReadFilePrefs();
             id fe0 = fp0[ZUS_KEY_ENABLED];
