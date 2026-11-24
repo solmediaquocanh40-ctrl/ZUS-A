@@ -575,6 +575,8 @@ static const ZUSEntry kZUSWhitelist[] = {
 };
 static const unsigned kZUSWhitelistCount = sizeof(kZUSWhitelist) / sizeof(kZUSWhitelist[0]);
 
+static long gHookedTotal = 0;
+
 // ===== Cửa seenTime: móc RIÊNG đúng kiểu (1.1.3 bổ sung) =====
 // InboxDataManager.processUpdateStatus…seenTime:… có tham số double nên bộ
 // móc chung bị cổng an toàn từ chối ở mọi bản trước: cửa này không để lại
@@ -616,7 +618,6 @@ static void ZUSInstallSeenTimeHook(Class cls, Method m, BOOL isClass) {
 }
 
 // ---------------- Lắp móc theo danh sách ----------------
-static long gHookedTotal = 0;
 
 static void ZUSInstallHook(Class cls, Method m, BOOL isClass, int cat, IMP repl) {
     SEL sel = method_getName(m);
