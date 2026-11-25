@@ -1,4 +1,4 @@
-# ZUS 1.3.0 (gói com.anhdang.zalounseen)
+# ZUS 1.3.1 (gói com.anhdang.zalounseen)
 
 Tweak chích vào Zalo trên máy đã jailbreak: đọc tin nhắn mà bên kia không thấy
 "đã xem" — đoạn chat vẫn giữ chữ đậm như chưa đọc — kèm tắt "đang nhập...",
@@ -30,6 +30,22 @@ chặn "đã nhận", chống thu hồi, ẩn đã xem Story và bộ công cụ
 - Trong Zalo: **ấn giữ thanh tab dưới đáy** (bất kỳ tab nào, ~0,5 giây) mở
   bảng công tắc + mục Danh bạ & hồ sơ + xem trạng thái dò; nút tròn **ZUS**
   ở màn hình chat vẫn còn làm lối vào dự phòng. (1.1.1)
+- **1.3.1 — sửa theo ZUS.log của 1.3.0 (chỉ sửa đúng lỗi log ghi
+  nhận)**: sao lưu tin nhắn đọc thẳng bảng ChatContent trong
+  chat_dbs/*.db (1.3.0 chọn nhầm bảng chỉ mục tìm kiếm FTS); sao lưu
+  cuộc gọi rà tên bảng trên toàn bộ container thay vì 6 file lớn nhất;
+  chặn cuộc gọi liệt kê mọi lớp trùng tên RMIncomingAlertAction + dump
+  danh sách hàm thật (bản Zalo này lớp đó không có executeAction như
+  log ứng viên 1.0.3); xác nhận gọi + dò ảnh gốc + emoji chỉ xét lớp
+  thuộc image Zalo (1.3.0 bị lớp hệ thống Apple ngập) và nhận thêm
+  dạng móc 4 tham số của makeCall; chặn quảng cáo đi từ cửa sổ chính,
+  nhận cả UICollectionView + móc kích thước ô; cảnh báo link tìm lớp
+  theo tên cuối (lớp Swift có tiền tố module) + census lớp *Link*;
+  kho thu hồi dùng khoá chống trùng đã bỏ phần query ký tên của URL;
+  thêm vòng dò đường lật trạng thái thu hồi (census hàm undo/recall +
+  thử ép getter undo) — vì log cả ngày cho thấy 4/7 cửa thu hồi chặn
+  thật mà bong bóng vẫn lật, 3 cửa còn lại không bao giờ cháy. 45 cửa
+  chặn cốt lõi giữ nguyên từng dòng như 1.2.2.
 - **1.3.0 — vòng tính năng lớn (15 món anh chốt)**: bảng ZUS giao diện
   mới (thẻ bo góc InsetGrouped, icon cho 4 tab, mục Tổng quan ở đầu tab
   Chặn); lọc nhiễu kho thu hồi (chỉ cất từ ô tin + chống cất trùng —

@@ -1,4 +1,4 @@
-// ZUS 1.3.0 — đọc tin nhắn Zalo mà bên kia không thấy "đã xem", tắt "đang nhập...".
+// ZUS 1.3.1 — đọc tin nhắn Zalo mà bên kia không thấy "đã xem", tắt "đang nhập...".
 //
 // SỬA GỐC VỤ VĂNG CỦA 1.0.4 (đã chứng minh ở mức lệnh máy từ file .ips và đúng
 // file .deb đã cài): hàm thay thế chung ZUSGenericHook khai tham số kiểu `id`,
@@ -624,6 +624,38 @@ static BOOL ZUSEncodingIsSafeN(Method m, int n) {
     return YES;
 }
 
+
+// ----- 1.3.1: tiện ích lớp — image của Zalo + tìm lớp theo tên cuối -----
+// Log 1.3.0: các vòng dò liệt kê MỌI lớp trong tiến trình nên bị lớp hệ
+// thống của Apple ngập (HomeKit / MediaPlayer / Photos / CallKit...),
+// lớp của chính Zalo không tới lượt trong giới hạn log. Từ 1.3.1 mọi
+// vòng dò chỉ xét lớp thuộc image của app Zalo (binary chính + các
+// framework nhúng trong Zalo.app). Lớp Swift có tên runtime dạng
+// "Module.Tên" nên việc tìm lớp phải so theo thành phần cuối sau dấu
+// chấm — objc_getClass("TênTrần") trả nil với lớp Swift.
+static BOOL ZUSClassIsZaloImage(Class cls) {
+    if (!cls) return NO;
+    const char *img = class_getImageName(cls);
+    if (!img) return NO;
+    NSString *p = @(img);
+    return [p containsString:@"/Zalo.app/"] || [p hasSuffix:@"/Zalo"];
+}
+
+static NSString *ZUSClassShortName(Class cls) {
+    NSString *n = NSStringFromClass(cls) ?: @"";
+    NSRange r = [n rangeOfString:@"." options:NSBackwardsSearch];
+    return (r.location != NSNotFound) ? [n substringFromIndex:r.location + 1] : n;
+}
+
+static void ZUSCollectClassesNamed(NSString *shortName, NSMutableArray *out) {
+    unsigned cc = 0;
+    Class *classes = objc_copyClassList(&cc);
+    for (unsigned i = 0; i < cc; i++) {
+        if ([ZUSClassShortName(classes[i]) isEqualToString:shortName]) [out addObject:classes[i]];
+    }
+    free(classes);
+}
+
 // ---------------- Kho bản gốc ----------------
 static NSMutableDictionary *gOrigs = nil; // "khoá" -> IMP gốc
 static NSMutableDictionary *gCats = nil;  // "khoá" -> nhóm (1/2)
@@ -703,8 +735,14 @@ static void ZUSVaultCapture(__unsafe_unretained id item) {
             if ([v isKindOfClass:[NSString class]] && [v length]) { mid = v; break; }
             if ([v isKindOfClass:[NSNumber class]]) { mid = [v stringValue]; break; }
         }
+        // 1.3.1: URL media cua Zalo la URL ky ten (query key=/time= thay
+        // moi lan cap lai) — khoa trung phai dung phan duong dan truoc
+        // dau "?" thi moi nhan ra cung mot tin o cac lan parse sau.
+        NSString *urlKey = url ?: @"";
+        NSRange qr = [urlKey rangeOfString:@"?"];
+        if (qr.location != NSNotFound) urlKey = [urlKey substringToIndex:qr.location];
         NSString *dkey = mid.length ? [@"id:" stringByAppendingString:mid]
-                                    : [NSString stringWithFormat:@"tx:%@|%@", text ?: @"", url ?: @""];
+                                    : [NSString stringWithFormat:@"tx:%@|%@", text ?: @"", urlKey];
         NSMutableArray *vault = [NSMutableArray array];
         id old = ZUSReadObject(ZUS_KEY_VAULT);
         if ([old isKindOfClass:[NSArray class]]) [vault addObjectsFromArray:old];
@@ -724,7 +762,7 @@ static void ZUSVaultCapture(__unsafe_unretained id item) {
                               @"dkey": dkey} atIndex:0];
         while (vault.count > 200) [vault removeLastObject];
         ZUSWriteSharedValue(ZUS_KEY_VAULT, vault);
-        ZUSLog(@"kho thu hồi: đã cất 1 tin (văn bản %lu ký tự, link %@)", (unsigned long)text.length, url.length ? @"có" : @"không");
+        ZUSLog(@"kho thu hồi: đã cất 1 tin (văn bản %lu ký tự, link %@, khoá %@)", (unsigned long)text.length, url.length ? @"có" : @"không", dkey.length > 60 ? [[dkey substringToIndex:60] stringByAppendingString:@"…"] : dkey);
     } @catch (NSException *e) {
         ZUSLog(@"kho thu hồi: lỗi cất tin: %@", e.name);
     }
@@ -1812,6 +1850,44 @@ static NSDictionary *ZUSSQLiteSchema(NSString *dbPath) {
     return schema;
 }
 
+static NSArray *ZUSSQLiteTableNames(NSString *dbPath) {
+    sqlite3 *db = NULL;
+    NSMutableArray *names = nil;
+    if (sqlite3_open_v2([dbPath fileSystemRepresentation], &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK) {
+        names = [NSMutableArray array];
+        sqlite3_stmt *st = NULL;
+        if (sqlite3_prepare_v2(db, "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'", -1, &st, NULL) == SQLITE_OK) {
+            while (sqlite3_step(st) == SQLITE_ROW) {
+                const unsigned char *tn = sqlite3_column_text(st, 0);
+                if (tn) [names addObject:[NSString stringWithUTF8String:(const char *)tn]];
+            }
+            sqlite3_finalize(st);
+        }
+        sqlite3_close(db);
+    }
+    return names;
+}
+
+static NSArray *ZUSEnumerateDBFiles(NSString *root) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSMutableArray *out = [NSMutableArray array];
+    NSDirectoryEnumerator *en = [fm enumeratorAtPath:root];
+    NSString *rel = nil;
+    while ((rel = [en nextObject])) {
+        NSString *low = [rel lowercaseString];
+        if ([low hasSuffix:@"-wal"] || [low hasSuffix:@"-shm"] || [low hasSuffix:@"-journal"]) continue;
+        if (!([low hasSuffix:@".db"] || [low hasSuffix:@".sqlite"] || [low hasSuffix:@".sqlite3"])) continue;
+        [out addObject:[root stringByAppendingPathComponent:rel]];
+    }
+    [out sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        unsigned long long sa = [[fm attributesOfItemAtPath:a error:nil][NSFileSize] unsignedLongLongValue];
+        unsigned long long sb = [[fm attributesOfItemAtPath:b error:nil][NSFileSize] unsignedLongLongValue];
+        if (sa != sb) return sa > sb ? NSOrderedDescending : NSOrderedAscending;
+        return NSOrderedSame;
+    }];
+    return out;
+}
+
 static void ZUSProbeStore(void) {
     if (gZUSStoreProbed) return;
     gZUSStoreProbed = YES;
@@ -1948,7 +2024,64 @@ static NSString *ZUSFormatEpoch(id v) {
     return [f stringFromDate:[NSDate dateWithTimeIntervalSince1970:d]];
 }
 
+static NSString *ZUSBackupMessagesLegacy(void);
+// 1.3.1: log 1.3.0 cho thay kho tin that la cac file chat_dbs/<uid>/*.db,
+// moi file mot doan chat, bang ChatContent doc duoc. Ban 1.3.0 chon bang
+// theo diem nen trung bang chi muc tim kiem FTS. V2 duyet thang chat_dbs,
+// file nao co ChatContent thi xuat, gop tat ca vao mot bo sao luu.
 static NSString *ZUSBackupMessages(void) {
+    NSString *chatDir = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/chat_dbs"];
+    NSArray *files = ZUSEnumerateDBFiles(chatDir);
+    NSMutableArray *allRows = [NSMutableArray array];
+    int usedFiles = 0, unreadable = 0;
+    for (NSString *path in files) {
+        if (allRows.count >= 60000 || usedFiles >= 40) break;
+        NSArray *names = ZUSSQLiteTableNames(path);
+        if (!names) { unreadable++; continue; }
+        if (![names containsObject:@"ChatContent"]) continue;
+        NSDictionary *schema = ZUSSQLiteSchema(path);
+        NSArray *colsAll = schema[@"ChatContent"];
+        NSArray *want = @[@"SenderId", @"CliMsgId", @"GlbMsgId", @"MsgStatus", @"MsgType", @"TimeStamp", @"MsgContent", @"LocalPath", @"SeqId"];
+        NSMutableArray *cols = [NSMutableArray array];
+        for (NSString *c in want) if ([colsAll containsObject:c]) [cols addObject:c];
+        if (![cols containsObject:@"MsgContent"]) continue;
+        NSArray *rows = ZUSSQLiteExport(path, @"ChatContent", cols, [cols containsObject:@"TimeStamp"] ? @"TimeStamp" : nil, 5000);
+        NSString *tag = [path lastPathComponent];
+        for (NSDictionary *r in rows) {
+            NSMutableDictionary *m = [r mutableCopy];
+            m[@"_db"] = tag;
+            [allRows addObject:m];
+        }
+        usedFiles++;
+        ZUSLog(@"sao lưu tin nhắn: %@ — %lu dòng ChatContent", tag, (unsigned long)rows.count);
+    }
+    if (!allRows.count) {
+        ZUSLog(@"sao lưu tin nhắn: không đọc được ChatContent ở file nào (%lu file trong chat_dbs, %d file không mở được) — quay về cách chọn bảng của 1.3.0", (unsigned long)files.count, unreadable);
+        return ZUSBackupMessagesLegacy();
+    }
+    NSString *docs = ZUSDocsPath();
+    NSDateFormatter *bf = [[NSDateFormatter alloc] init];
+    bf.dateFormat = @"yyyyMMdd-HHmmss";
+    NSString *base = [NSString stringWithFormat:@"ZUS-Messages-%@", [bf stringFromDate:[NSDate date]]];
+    NSString *jsonPath = [docs stringByAppendingPathComponent:[base stringByAppendingString:@".json"]];
+    NSString *txtPath = [docs stringByAppendingPathComponent:[base stringByAppendingString:@".txt"]];
+    NSData *json = [NSJSONSerialization dataWithJSONObject:allRows options:NSJSONWritingPrettyPrinted error:nil];
+    [json writeToFile:jsonPath atomically:YES];
+    NSMutableString *txt = [NSMutableString string];
+    for (NSDictionary *r in allRows) {
+        NSString *when = ZUSFormatEpoch(r[@"TimeStamp"]);
+        NSString *sender = [r[@"SenderId"] description] ?: @"";
+        NSString *content = [r[@"MsgContent"] description] ?: @"";
+        if (content.length > 400) content = [[content substringToIndex:400] stringByAppendingString:@"…"];
+        [txt appendFormat:@"[%@] (%@) %@: %@\n", when, r[@"_db"], sender, content.length ? content : @"(tin media/loại khác)"];
+    }
+    [txt writeToFile:txtPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    gZUSLastMsgFiles = @[jsonPath, txtPath];
+    ZUSLog(@"sao lưu tin nhắn: tổng %lu dòng từ %d đoạn chat (ChatContent) -> %@", (unsigned long)allRows.count, usedFiles, jsonPath);
+    return [NSString stringWithFormat:@"Đã sao lưu %lu tin nhắn từ %d đoạn chat (bảng ChatContent).\n\nFile trong Documents của Zalo:\n%@\n%@", (unsigned long)allRows.count, usedFiles, jsonPath, txtPath];
+}
+
+static NSString *ZUSBackupMessagesLegacy(void) {
     ZUSProbeStore();
     NSString *path = nil;
     NSString *table = ZUSPickTable(NO, &path);
@@ -1981,11 +2114,36 @@ static NSString *ZUSBackupMessages(void) {
 }
 
 static NSString *ZUSBackupCalls(void) {
-    ZUSProbeStore();
-    NSString *path = nil;
-    NSString *table = ZUSPickTable(YES, &path);
-    if (!table) return @"Chưa nhận diện được bảng lịch sử cuộc gọi trong kho dữ liệu của Zalo.\n\nCấu trúc kho đã được ghi vào ZUS.log — anh gửi file log cho em, vòng sau em chốt đúng bảng và cột để đọc.";
-    NSArray *cols = gZUSStoreSchema[path][table];
+    // 1.3.0 that bai vi chi do 6 file lon nhat. V2 ra TEN BANG tren moi
+    // file db trong container (mo file goc chi-doc, khong sao chep nen
+    // nhanh), tim bang co ten chua "call"; thay thi moi sao chep de xuat.
+    NSString *home = NSHomeDirectory();
+    NSMutableArray *files = [NSMutableArray array];
+    for (NSString *root in @[[home stringByAppendingPathComponent:@"Library"], [home stringByAppendingPathComponent:@"Documents"]])
+        [files addObjectsFromArray:ZUSEnumerateDBFiles(root)];
+    NSMutableArray *cands = [NSMutableArray array];
+    int scanned = 0, unreadable = 0, skippedDup = 0;
+    for (NSString *path in files) {
+        if ([path containsString:@"/CloudDB/"]) { skippedDup++; continue; }
+        NSArray *names = ZUSSQLiteTableNames(path);
+        if (!names) { unreadable++; continue; }
+        scanned++;
+        for (NSString *t in names) {
+            if ([[t lowercaseString] containsString:@"call"]) {
+                [cands addObject:@{@"path": path, @"table": t}];
+                ZUSLog(@"cuộc gọi: ứng viên bảng %@ trong %@", t, [path lastPathComponent]);
+            }
+        }
+        if (scanned % 200 == 0) ZUSLog(@"cuộc gọi: đã rà %d file...", scanned);
+    }
+    ZUSLog(@"cuộc gọi: rà xong %d file (%d không mở được, bỏ qua %d file bản sao đám mây), %lu bảng ứng viên", scanned, unreadable, skippedDup, (unsigned long)cands.count);
+    if (!cands.count) return @"Vẫn chưa thấy bảng lịch sử cuộc gọi: đã rà toàn bộ kho dữ liệu của Zalo, không có bảng nào tên chứa 'call'.\n\nChi tiết lượt rà đã ghi vào ZUS.log — anh gửi log cho em để vòng sau dò theo hướng khác (có thể lịch sử cuộc gọi không lưu trong sqlite).";
+    NSDictionary *pick = cands[0];
+    NSString *path = pick[@"path"];
+    NSString *table = pick[@"table"];
+    NSDictionary *schema = ZUSSQLiteSchema(path);
+    NSArray *cols = schema[table];
+    if (!cols.count) return [NSString stringWithFormat:@"Thấy bảng %@ trong %@ nhưng không đọc được cột. Chi tiết đã ghi vào ZUS.log.", table, [path lastPathComponent]];
     NSString *timeCol = ZUSFirstCol(cols, @[@"created", @"time", @"date", @"timestamp", @"ts"]);
     NSArray *rows = ZUSSQLiteExport(path, table, cols, timeCol, 20000);
     if (!rows.count) return [NSString stringWithFormat:@"Đã thấy bảng %@ nhưng đọc ra 0 dòng. Chi tiết đã ghi vào ZUS.log.", table];
@@ -2009,7 +2167,6 @@ static NSString *ZUSBackupCalls(void) {
     ZUSLog(@"sao lưu cuộc gọi: %lu dòng từ %@.%@ -> %@", (unsigned long)rows.count, [path lastPathComponent], table, jsonPath);
     return [NSString stringWithFormat:@"Đã sao lưu %lu dòng lịch sử cuộc gọi (bảng %@).\n\nFile trong Documents của Zalo:\n%@\n%@", (unsigned long)rows.count, table, jsonPath, csvPath];
 }
-
 static NSString *ZUSBackupAll(void) {
     NSString *docs = ZUSDocsPath();
     NSDateFormatter *bf = [[NSDateFormatter alloc] init];
@@ -2060,7 +2217,7 @@ static NSString *ZUSExportProfile(void) {
     NSMutableDictionary *prof = [NSMutableDictionary dictionary];
     for (NSString *k in ZUSAllPrefKeys()) prof[k] = @(ZUSReadBool(k, NO));
     prof[@"_app"] = @"ZUS";
-    prof[@"_version"] = @"1.3.0";
+    prof[@"_version"] = @"1.3.1";
     NSData *json = [NSJSONSerialization dataWithJSONObject:prof options:NSJSONWritingPrettyPrinted error:nil];
     NSString *path = [ZUSDocsPath() stringByAppendingPathComponent:@"ZUS-Profile.json"];
     return [json writeToFile:path atomically:YES] ? path : nil;
@@ -2431,7 +2588,7 @@ static void ZUSSaveAvatarCover(UIViewController *fromVC);
         }
         if (!jrows.count) [jrows addObject:@{@"kind": @"info", @"title": @"Hôm nay chưa ghi được lần chặn nào theo đoạn chat (cần trích được mã đoạn chat)."}];
         [secs addObject:@{@"header": @"Nhật ký chặn hôm nay — theo đoạn chat", @"rows": jrows}];
-        [secs addObject:@{@"header": @"", @"footer": @"ZUS 1.3.0 • Thay đổi ăn ngay, không cần mở lại Zalo.", @"rows": @[
+        [secs addObject:@{@"header": @"", @"footer": @"ZUS 1.3.1 • Thay đổi ăn ngay, không cần mở lại Zalo.", @"rows": @[
             @{@"kind": @"switch", @"title": @"Ghi log gỡ lỗi", @"key": ZUS_KEY_DEBUG, @"def": @YES},
         ]}];
     }
@@ -3498,34 +3655,58 @@ static long long ZUSLinkHook(__unsafe_unretained id self, SEL _cmd, void *a1, vo
 
 static void ZUSInstallLinkHooks(void) {
     if (!gLinkOrigs) gLinkOrigs = [NSMutableDictionary dictionary];
+    // 1.3.0 tim lop bang objc_getClass(ten tran): LinkTableItem va
+    // TextTableItem khong ton tai duoi ten do (lop Swift mang tien to
+    // module trong ten runtime) nen khong moc nao cham duoc dung lop.
+    // V2 tim theo ten cuoi trong danh sach lop + census lop *Link*.
+    @try {
+        unsigned cc = 0;
+        Class *all = objc_copyClassList(&cc);
+        int census = 0;
+        for (unsigned i = 0; i < cc && census < 20; i++) {
+            if (!ZUSClassIsZaloImage(all[i])) continue;
+            NSString *shortN = ZUSClassShortName(all[i]);
+            if (![[shortN lowercaseString] containsString:@"link"]) continue;
+            unsigned mc = 0;
+            Method *ml = class_copyMethodList(all[i], &mc);
+            free(ml);
+            ZUSLog(@"link: census lớp %@ (tên đầy đủ %@) — %d hàm", shortN, NSStringFromClass(all[i]), mc);
+            census++;
+        }
+        free(all);
+    } @catch (NSException *e) {}
     const char *names[] = {"MessageTableItem", "TextTableItem", "LinkTableItem", "PhotoTableItem", "VideoTableItem", "StickerTableItem"};
     int total = 0;
     for (int ci = 0; ci < 6; ci++) {
-        Class cls = objc_getClass(names[ci]);
-        if (!cls) continue;
-        unsigned mc = 0;
-        Method *ml = class_copyMethodList(cls, &mc);
+        NSString *want = @(names[ci]);
+        NSMutableArray *matches = [NSMutableArray array];
+        ZUSCollectClassesNamed(want, matches);
+        if (!matches.count) { ZUSLog(@"link: KHÔNG thấy lớp tên %@ trong danh sách lớp", want); continue; }
         BOOL isLinkClass = (ci == 2);
-        int classHooks = 0;
-        for (unsigned i = 0; i < mc; i++) {
-            Method m = ml[i];
-            NSString *sn = NSStringFromSelector(method_getName(m));
-            NSString *low = [sn lowercaseString];
-            if ([low containsString:@"undo"]) continue;
-            BOOL nameHit = isLinkClass || [low containsString:@"link"] || [low containsString:@"url"] ||
-                           [low containsString:@"parser"] || [low containsString:@"parse"];
-            if (!nameHit) continue;
-            int argc = (int)method_getNumberOfArguments(m) - 2;
-            if (argc < 0 || argc > 3) continue;
-            if (!ZUSEncodingIsSafeN(m, argc)) continue;
-            NSString *key = [NSString stringWithFormat:@"%@|%@", NSStringFromClass(cls), sn];
-            if (gLinkOrigs[key]) continue;
-            void *orig = NULL;
-            MSHookMessageEx(cls, method_getName(m), (IMP)ZUSLinkHook, (IMP *)&orig);
-            if (orig) { gLinkOrigs[key] = @[[NSValue valueWithPointer:orig], @(argc)]; total++; classHooks++; ZUSLog(@"link: đã gắn móc dò %@.%@", NSStringFromClass(cls), sn); }
+        for (Class cls in matches) {
+            unsigned mc = 0;
+            Method *ml = class_copyMethodList(cls, &mc);
+            int classHooks = 0;
+            for (unsigned i = 0; i < mc; i++) {
+                Method m = ml[i];
+                NSString *sn = NSStringFromSelector(method_getName(m));
+                NSString *low = [sn lowercaseString];
+                if ([low containsString:@"undo"]) continue;
+                BOOL nameHit = isLinkClass || [low containsString:@"link"] || [low containsString:@"url"] ||
+                               [low containsString:@"parser"] || [low containsString:@"parse"];
+                if (!nameHit) continue;
+                int argc = (int)method_getNumberOfArguments(m) - 2;
+                if (argc < 0 || argc > 3) continue;
+                if (!ZUSEncodingIsSafeN(m, argc)) continue;
+                NSString *key = [NSString stringWithFormat:@"%@|%@", NSStringFromClass(cls), sn];
+                if (gLinkOrigs[key]) continue;
+                void *orig = NULL;
+                MSHookMessageEx(cls, method_getName(m), (IMP)ZUSLinkHook, (IMP *)&orig);
+                if (orig) { gLinkOrigs[key] = @[[NSValue valueWithPointer:orig], @(argc)]; total++; classHooks++; ZUSLog(@"link: đã gắn móc dò %@.%@", NSStringFromClass(cls), sn); }
+            }
+            free(ml);
+            ZUSLog(@"link: lớp %@ — %d hàm, gắn %d móc", NSStringFromClass(cls), mc, classHooks);
         }
-        free(ml);
-        ZUSLog(@"link: lớp %@ — %d hàm, gắn %d móc", @(names[ci]), mc, classHooks);
     }
     ZUSLog(@"link: tổng %d móc dò link", total);
 }
@@ -3791,21 +3972,49 @@ static void ZUSIncomingAlertHook(__unsafe_unretained id self, SEL _cmd, __unsafe
 static BOOL gCallBlockInstalled = NO;
 static void ZUSInstallCallBlock(void) {
     if (gCallBlockInstalled) return;
-    Class rm = objc_getClass("RMIncomingAlertAction");
-    if (!rm) return;
-    SEL es = sel_registerName("executeActionWithThreadId:toMuteCall:profileInfo:dataUpdateHandler:");
-    Method m = class_getInstanceMethod(rm, es);
-    if (!m) { ZUSLog(@"chặn cuộc gọi: RMIncomingAlertAction không có executeAction... — bỏ qua"); gCallBlockInstalled = YES; return; }
-    NSString *e = [NSString stringWithUTF8String:method_getTypeEncoding(m) ?: ""];
-    BOOL ok = [e hasPrefix:@"v"] && ([e containsString:@"B"] || [e containsString:@"c"]) && [e containsString:@"@?"];
-    if (!ok) {
-        ZUSLog(@"chặn cuộc gọi: chữ ký executeAction lạ (%@) — KHÔNG lắp móc chặn ở bản này, chỉ dò", e);
-        gCallBlockInstalled = YES;
-        return;
-    }
-    MSHookMessageEx(rm, es, (IMP)ZUSIncomingAlertHook, (IMP *)&gOrigIncomingAlert);
-    gCallBlockInstalled = YES;
-    ZUSLog(@"chặn cuộc gọi: đã lắp móc vào RMIncomingAlertAction.executeAction... (enc %@)", e);
+    @try {
+        SEL es = sel_registerName("executeActionWithThreadId:toMuteCall:profileInfo:dataUpdateHandler:");
+        // 1.3.0: objc_getClass tra ve mot lop khong co ham nay, trong khi
+        // log ung vien 1.0.3 tung thay no — co the co nhieu lop trung ten
+        // (binary chinh + framework nhung) hoac ham nam o lop khac. V2
+        // liet ke MOI lop trung ten, dump danh sach ham cua tung lop vao
+        // log, va moc vao lop nao co dung selector; chua thay thi thu lai.
+        NSMutableArray *matches = [NSMutableArray array];
+        ZUSCollectClassesNamed(@"RMIncomingAlertAction", matches);
+        if (!matches.count) { ZUSLog(@"chặn cuộc gọi: không thấy lớp nào tên RMIncomingAlertAction"); return; }
+        static BOOL dumped = NO;
+        for (Class cls in matches) {
+            Method m = class_getInstanceMethod(cls, es);
+            if (!dumped) {
+                unsigned mc = 0;
+                Method *ml = class_copyMethodList(cls, &mc);
+                NSMutableArray *names = [NSMutableArray array];
+                for (unsigned i = 0; i < mc; i++) [names addObject:NSStringFromSelector(method_getName(ml[i]))];
+                free(ml);
+                ZUSLog(@"chặn cuộc gọi: lớp %@ (%@) — %d hàm: %@", NSStringFromClass(cls), ZUSClassIsZaloImage(cls) ? @"image Zalo" : @"image khác", mc, [names componentsJoinedByString:@", "]);
+            }
+            if (!m) continue;
+            NSString *e = [NSString stringWithUTF8String:method_getTypeEncoding(m) ?: ""];
+            BOOL ok = [e hasPrefix:@"v"] && ([e containsString:@"B"] || [e containsString:@"c"]) && [e containsString:@"@?"];
+            if (!ok) {
+                ZUSLog(@"chặn cuộc gọi: chữ ký executeAction lạ (%@) trên %@ — KHÔNG lắp móc chặn ở bản này, chỉ dò", e, NSStringFromClass(cls));
+                gCallBlockInstalled = YES;
+                dumped = YES;
+                return;
+            }
+            MSHookMessageEx(cls, es, (IMP)ZUSIncomingAlertHook, (IMP *)&gOrigIncomingAlert);
+            gCallBlockInstalled = YES;
+            dumped = YES;
+            ZUSLog(@"chặn cuộc gọi: đã lắp móc vào %@.executeAction... (enc %@)", NSStringFromClass(cls), e);
+            return;
+        }
+        dumped = YES;
+        ZUSLog(@"chặn cuộc gọi: %lu lớp tên RMIncomingAlertAction nhưng không lớp nào có executeAction... — sẽ thử lại", (unsigned long)matches.count);
+        static int attempts = 0;
+        if (++attempts <= 3) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ ZUSInstallCallBlock(); });
+        }
+    } @catch (NSException *e) { ZUSLog(@"chặn cuộc gọi: lỗi lắp: %@", e.name); }
 }
 
 // ----- Xác nhận trước khi gọi -----
@@ -3861,18 +4070,63 @@ static void ZUSConfirmHook0(id self, SEL _cmd) {
     ZUSConfirmGate(self, _cmd, nil, [gConfirmOrigs[key] pointerValue], 0);
 }
 
+// 1.3.1: móc typed cho ứng viên gọi đi dạng 4 tham số (@,q,q,@) —
+// ZACallOARouter.makeCallOAToUserId:callType:sourceCall:data: trong log
+// 1.3.0 bị cổng chữ ký bỏ qua vì không thuộc dạng 0/1 tham số.
+static id gPend4Self = nil;
+static SEL gPend4Sel = NULL;
+static id gPend4A1 = nil;
+static long long gPend4A2 = 0;
+static long long gPend4A3 = 0;
+static id gPend4A4 = nil;
+static void *gPend4Orig = NULL;
+
+static void ZUSRunPendingCall4(void) {
+    if (!gPend4Orig) return;
+    void *o = gPend4Orig;
+    id sf = gPend4Self; SEL c = gPend4Sel; id a1 = gPend4A1; long long a2 = gPend4A2, a3 = gPend4A3; id a4 = gPend4A4;
+    gPend4Orig = NULL; gPend4Self = nil; gPend4A1 = nil; gPend4A4 = nil; gPend4Sel = NULL;
+    ((void (*)(id, SEL, id, long long, long long, id))o)(sf, c, a1, a2, a3, a4);
+}
+
+static void ZUSConfirmHook4(id self, SEL _cmd, id a1, long long a2, long long a3, id a4) {
+    NSString *key = [NSString stringWithFormat:@"%@|%@", NSStringFromClass(object_getClass(self)), NSStringFromSelector(_cmd)];
+    void *orig = [gConfirmOrigs[key] pointerValue];
+    if (!orig) return;
+    if (!gConfirmCall || !gEnabled || !gLicensed) {
+        ((void (*)(id, SEL, id, long long, long long, id))orig)(self, _cmd, a1, a2, a3, a4);
+        return;
+    }
+    gPend4Self = self; gPend4Sel = _cmd; gPend4A1 = a1; gPend4A2 = a2; gPend4A3 = a3; gPend4A4 = a4; gPend4Orig = orig;
+    ZUSLog(@"xác nhận gọi: giữ lại %@.%@ (dạng 4 tham số) chờ anh xác nhận", NSStringFromClass(object_getClass(self)), NSStringFromSelector(_cmd));
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *vc = ZUSTopVC();
+        if (!vc) { ZUSRunPendingCall4(); return; }
+        NSString *who = gZUSCurrentThreadName.length ? gZUSCurrentThreadName : @"người này";
+        UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Xác nhận cuộc gọi"
+            message:[NSString stringWithFormat:@"Bắt đầu cuộc gọi với %@?", who] preferredStyle:UIAlertControllerStyleAlert];
+        [a addAction:[UIAlertAction actionWithTitle:@"Huỷ" style:UIAlertActionStyleCancel handler:^(UIAlertAction *act) {
+            gPend4Orig = NULL; gPend4Self = nil; gPend4A1 = nil; gPend4A4 = nil; gPend4Sel = NULL;
+            ZUSLog(@"xác nhận gọi: anh đã huỷ cuộc gọi");
+        }]];
+        [a addAction:[UIAlertAction actionWithTitle:@"Gọi" style:UIAlertActionStyleDefault handler:^(UIAlertAction *act) { ZUSRunPendingCall4(); }]];
+        [vc presentViewController:a animated:YES completion:nil];
+    });
+}
+
 static BOOL gConfirmInstalled = NO;
 static void ZUSInstallConfirmCall(void) {
     if (gConfirmInstalled) return;
     if (!gConfirmOrigs) gConfirmOrigs = [NSMutableDictionary dictionary];
     @try {
         NSArray *patterns = @[@"startcall", @"makecall", @"callwith", @"startvoicecall", @"startvideocall", @"placecall", @"initiatecall", @"ontapcall", @"callvoip"];
-        NSArray *exclude = @[@"set", @"update", @"did", @"will", @"handle", @"receive", @"incoming", @"end", @"stop", @"finish", @"config", @"enable", @"state"];
+        NSArray *exclude = @[@"set", @"update", @"did", @"will", @"handle", @"receive", @"incoming", @"end", @"stop", @"finish", @"config", @"enable", @"state", @"answer", @"delete", @"fail", @"decline", @"reject"];
         int installed = 0;
         unsigned cc = 0;
         Class *classes = objc_copyClassList(&cc);
         for (unsigned i = 0; i < cc && installed < 4; i++) {
             NSString *cn = NSStringFromClass(classes[i]);
+            if (!ZUSClassIsZaloImage(classes[i])) continue;
             NSString *cl = [cn lowercaseString];
             if (![cl containsString:@"chat"] && ![cl containsString:@"call"]) continue;
             unsigned mc = 0;
@@ -3890,12 +4144,22 @@ static void ZUSInstallConfirmCall(void) {
                 NSString *e = [NSString stringWithUTF8String:method_getTypeEncoding(m) ?: ""];
                 int argc = (int)method_getNumberOfArguments(m) - 2;
                 BOOL ok = [e hasPrefix:@"v"] && (argc == 0 || (argc == 1 && [e containsString:@"@"]));
+                BOOL is4 = NO;
+                if (!ok && argc == 4 && [e hasPrefix:@"v"]) {
+                    char t0[8] = {0}, t1[8] = {0}, t2[8] = {0}, t3[8] = {0};
+                    if (method_getArgumentTypeAtIndex(m, 2, t0, sizeof(t0)) && method_getArgumentTypeAtIndex(m, 3, t1, sizeof(t1)) &&
+                        method_getArgumentTypeAtIndex(m, 4, t2, sizeof(t2)) && method_getArgumentTypeAtIndex(m, 5, t3, sizeof(t3))) {
+                        is4 = (t0[0] == '@') && (t1[0] == 'q' || t1[0] == 'Q' || t1[0] == 'l' || t1[0] == 'L') &&
+                              (t2[0] == 'q' || t2[0] == 'Q' || t2[0] == 'l' || t2[0] == 'L') && (t3[0] == '@');
+                    }
+                    ok = is4;
+                }
                 ZUSLog(@"xác nhận gọi: ứng viên %@.%@ enc=%@ — %@", cn, sn, e, ok ? @"SẼ LẮP" : @"bỏ qua (chữ ký không an toàn)");
                 if (!ok) continue;
                 NSString *key = [NSString stringWithFormat:@"%@|%@", cn, sn];
                 if (gConfirmOrigs[key]) continue;
                 void *orig = NULL;
-                IMP repl = (argc == 1) ? (IMP)ZUSConfirmHook1 : (IMP)ZUSConfirmHook0;
+                IMP repl = is4 ? (IMP)ZUSConfirmHook4 : ((argc == 1) ? (IMP)ZUSConfirmHook1 : (IMP)ZUSConfirmHook0);
                 MSHookMessageEx(classes[i], method_getName(m), repl, (IMP *)&orig);
                 if (orig) { gConfirmOrigs[key] = [NSValue valueWithPointer:orig]; installed++; ZUSLog(@"xác nhận gọi: đã lắp móc vào %@", key); }
             }
@@ -3948,6 +4212,7 @@ static void ZUSInstallPhotoOriginal(void) {
         Class *classes = objc_copyClassList(&cc);
         for (unsigned i = 0; i < cc && logged < 80; i++) {
             NSString *cn = NSStringFromClass(classes[i]);
+            if (!ZUSClassIsZaloImage(classes[i])) continue;
             NSString *cl = [cn lowercaseString];
             if (!([cl containsString:@"photo"] || [cl containsString:@"image"] || [cl containsString:@"chat"] || [cl containsString:@"media"])) continue;
             unsigned mc = 0;
@@ -4026,6 +4291,7 @@ static void ZUSInstallEmojiProbe(void) {
         Class *classes = objc_copyClassList(&cc);
         for (unsigned i = 0; i < cc && logged < 100; i++) {
             NSString *cn = NSStringFromClass(classes[i]);
+            if (!ZUSClassIsZaloImage(classes[i])) continue;
             NSString *cl = [cn lowercaseString];
             if (![cl containsString:@"react"] && ![cl containsString:@"emotion"]) continue;
             unsigned mc = 0;
@@ -4063,6 +4329,7 @@ static NSMutableDictionary *gAdOrigs = nil;
 static NSMutableSet *gAdFlagged = nil;
 static NSMutableDictionary *gAdHeightOrigs = nil;
 static NSMutableDictionary *gAdCellOrigs = nil;
+static NSMutableDictionary *gAdSizeOrigs = nil;
 
 static BOOL ZUSAdScanCell(__unsafe_unretained id cell) {
     static NSMutableSet *logged = nil;
@@ -4223,6 +4490,125 @@ static void ZUSAdHookTablesIn(__unsafe_unretained id vc) {
     } @catch (NSException *e) { ZUSLog(@"quảng cáo: lỗi chui cây view: %@", e.name); }
 }
 
+
+// ----- 1.3.1: quảng cáo v3 -----
+// Log 1.3.0: walker cũ tìm UITableView trong cây view của từng tab bằng
+// viewIfLoaded — tab chưa chọn thì view chưa nạp nên bỏ qua lặng lẽ, và
+// ngay tab Inbox đang chọn cũng không có UITableView nào (danh sách chat
+// nhiều khả năng là UICollectionView). V3 đi từ CỬA SỔ chính (thứ đang
+// thật sự hiển thị), nhận cả hai loại danh sách, và ghi sổ từng danh
+// sách thấy được để log vòng sau khỏi đoán mò.
+static id ZUSAdCellForItem(id self, SEL _cmd, id view, id ip) {
+    NSString *key = [NSString stringWithFormat:@"%@|%@", NSStringFromClass(object_getClass(self)), NSStringFromSelector(_cmd)];
+    void *orig = [gAdCellOrigs[key] pointerValue];
+    id cell = orig ? ((id (*)(id, SEL, id, id))orig)(self, _cmd, view, ip) : nil;
+    if (!cell || !gAdBlock) return cell;
+    @try {
+        if (!gAdFlagged) gAdFlagged = [NSMutableSet set];
+        NSString *fk = [NSString stringWithFormat:@"%p|%ld-%ld", view, (long)[ip section], (long)[ip row]];
+        if (ZUSAdScanCell(cell)) {
+            if (![gAdFlagged containsObject:fk]) {
+                [gAdFlagged addObject:fk];
+                ZUSLog(@"quảng cáo: đã đánh dấu ô %@ để thu gọn (mục %ld-%ld)", NSStringFromClass([cell class]), (long)[ip section], (long)[ip row]);
+            }
+            ((UIView *)cell).hidden = YES;
+        } else {
+            [gAdFlagged removeObject:fk];
+        }
+    } @catch (NSException *e) {}
+    return cell;
+}
+
+static CGSize ZUSAdSizeForItem(id self, SEL _cmd, id cv, id layout, id ip) {
+    NSString *key = [NSString stringWithFormat:@"%@|%@", NSStringFromClass(object_getClass(self)), NSStringFromSelector(_cmd)];
+    void *orig = [gAdSizeOrigs[key] pointerValue];
+    CGSize sz = orig ? ((CGSize (*)(id, SEL, id, id, id))orig)(self, _cmd, cv, layout, ip) : CGSizeMake(50, 50);
+    if (!gAdBlock) return sz;
+    @try {
+        NSString *fk = [NSString stringWithFormat:@"%p|%ld-%ld", cv, (long)[ip section], (long)[ip row]];
+        if ([gAdFlagged containsObject:fk]) return CGSizeMake(0.01, 0.01);
+    } @catch (NSException *e) {}
+    return sz;
+}
+
+static void ZUSFindScrolls(UIView *v, NSMutableArray *out, int depth) {
+    if (!v || depth > 12) return;
+    if ([v isKindOfClass:[UITableView class]] || [v isKindOfClass:[UICollectionView class]]) [out addObject:v];
+    for (UIView *sv in v.subviews) ZUSFindScrolls(sv, out, depth + 1);
+}
+
+static void ZUSAdHookScrollsIn(UIView *root, NSString *where) {
+    if (!root) return;
+    @try {
+        NSMutableArray *scrolls = [NSMutableArray array];
+        ZUSFindScrolls(root, scrolls, 0);
+        if (!gAdHeightOrigs) gAdHeightOrigs = [NSMutableDictionary dictionary];
+        if (!gAdCellOrigs) gAdCellOrigs = [NSMutableDictionary dictionary];
+        if (!gAdSizeOrigs) gAdSizeOrigs = [NSMutableDictionary dictionary];
+        if (!gAdOrigs) gAdOrigs = [NSMutableDictionary dictionary];
+        if (!gAdFlagged) gAdFlagged = [NSMutableSet set];
+        static NSMutableSet *seenScrolls = nil;
+        if (!seenScrolls) seenScrolls = [NSMutableSet set];
+        for (UIView *sv in scrolls) {
+            BOOL isTable = [sv isKindOfClass:[UITableView class]];
+            id del = isTable ? ((UITableView *)sv).delegate : ((UICollectionView *)sv).delegate;
+            id ds = isTable ? ((UITableView *)sv).dataSource : ((UICollectionView *)sv).dataSource;
+            NSString *triple = [NSString stringWithFormat:@"%@|%@|del:%@|ds:%@", NSStringFromClass([sv class]), where,
+                                del ? NSStringFromClass([del class]) : @"-", ds ? NSStringFromClass([ds class]) : @"-"];
+            if (![seenScrolls containsObject:triple]) {
+                [seenScrolls addObject:triple];
+                ZUSLog(@"quảng cáo: thấy %@ trong %@ — delegate %@, dataSource %@", NSStringFromClass([sv class]), where,
+                       del ? NSStringFromClass([del class]) : @"(không)", ds ? NSStringFromClass([ds class]) : @"(không)");
+            }
+            if (del) {
+                Class dc = object_getClass(del);
+                if (isTable) {
+                    SEL hs = sel_registerName("tableView:heightForRowAtIndexPath:");
+                    if (class_getInstanceMethod(dc, hs)) {
+                        NSString *key = [NSString stringWithFormat:@"%@|%@", NSStringFromClass(dc), NSStringFromSelector(hs)];
+                        if (!gAdHeightOrigs[key]) {
+                            void *orig = NULL;
+                            MSHookMessageEx(dc, hs, (IMP)ZUSAdHeightForRow, (IMP *)&orig);
+                            if (orig) { gAdHeightOrigs[key] = [NSValue valueWithPointer:orig]; ZUSLog(@"quảng cáo: đã gắn móc chiều cao ô vào %@", key); }
+                        }
+                    }
+                } else {
+                    SEL ss = sel_registerName("collectionView:layout:sizeForItemAtIndexPath:");
+                    if (class_getInstanceMethod(dc, ss)) {
+                        NSString *key = [NSString stringWithFormat:@"%@|%@", NSStringFromClass(dc), NSStringFromSelector(ss)];
+                        if (!gAdSizeOrigs[key]) {
+                            void *orig = NULL;
+                            MSHookMessageEx(dc, ss, (IMP)ZUSAdSizeForItem, (IMP *)&orig);
+                            if (orig) { gAdSizeOrigs[key] = [NSValue valueWithPointer:orig]; ZUSLog(@"quảng cáo: đã gắn móc kích thước ô (collection) vào %@", key); }
+                        }
+                    }
+                }
+                SEL ws = sel_registerName(isTable ? "tableView:willDisplayCell:forRowAtIndexPath:" : "collectionView:willDisplayCell:forItemAtIndexPath:");
+                if (class_getInstanceMethod(dc, ws)) {
+                    NSString *key = [NSString stringWithFormat:@"%@|%@", NSStringFromClass(dc), NSStringFromSelector(ws)];
+                    if (!gAdOrigs[key]) {
+                        void *orig = NULL;
+                        MSHookMessageEx(dc, ws, (IMP)ZUSAdWillDisplay, (IMP *)&orig);
+                        if (orig) { gAdOrigs[key] = [NSValue valueWithPointer:orig]; ZUSLog(@"quảng cáo: đã gắn móc hiển thị ô (delegate thật) vào %@", key); }
+                    }
+                }
+            }
+            if (ds) {
+                Class sc = object_getClass(ds);
+                SEL cs = sel_registerName(isTable ? "tableView:cellForRowAtIndexPath:" : "collectionView:cellForItemAtIndexPath:");
+                if (class_getInstanceMethod(sc, cs)) {
+                    NSString *key = [NSString stringWithFormat:@"%@|%@", NSStringFromClass(sc), NSStringFromSelector(cs)];
+                    if (!gAdCellOrigs[key]) {
+                        void *orig = NULL;
+                        MSHookMessageEx(sc, cs, isTable ? (IMP)ZUSAdCellForRow : (IMP)ZUSAdCellForItem, (IMP *)&orig);
+                        if (orig) { gAdCellOrigs[key] = [NSValue valueWithPointer:orig]; ZUSLog(@"quảng cáo: đã gắn móc lấy ô vào %@", key); }
+                    }
+                }
+            }
+        }
+    } @catch (NSException *e) { ZUSLog(@"quảng cáo: lỗi quét danh sách: %@", e.name); }
+}
+
 static void ZUSAttachMediaLPToView(UIView *root) {
     if (!root) return;
     @try {
@@ -4253,8 +4639,12 @@ static void ZUSAdWalkAndHook(void) {
         for (UIWindow *w in ((UIWindowScene *)scene).windows) if (w.isKeyWindow) { win = w; break; }
         if (win) break;
     }
+    if (!win) { ZUSLog(@"quảng cáo: chưa thấy cửa sổ chính — sẽ thử lại"); return; }
+    // 1.3.1: quét thẳng cây view của cửa sổ chính — bắt được danh sách
+    // đang hiển thị dù nó thuộc tab/ màn hình nào, cả bảng lẫn collection.
+    ZUSAdHookScrollsIn(win, @"cửa sổ chính");
     UIViewController *root = win.rootViewController;
-    if (!root) { ZUSLog(@"quảng cáo: chưa thấy cửa sổ chính — sẽ thử lại"); return; }
+    if (!root) return;
     NSMutableArray *tops = [NSMutableArray array];
     if ([root isKindOfClass:[UITabBarController class]]) {
         for (UIViewController *c in ((UITabBarController *)root).viewControllers) {
@@ -4289,6 +4679,72 @@ static void ZUSInstallAdDiscovery(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(90 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ ZUSAdWalkAndHook(); });
 }
 
+
+
+// ----- 1.3.1: dò đường lật trạng thái thu hồi -----
+// Log cả ngày 11-25 (bản 1.2.2): 4/7 cửa thu hồi cháy và chặn thật
+// nhưng bong bóng vẫn lật thành "đã thu hồi"; 3 cửa còn lại
+// (updateDBUndo / processUndoWithSocket / _handleRecallWithData)
+// không bao giờ cháy. Trạng thái thu hồi được áp ngay trên entity /
+// dữ liệu khi gói đồng bộ về, updateUndoWithParser chỉ là hệ quả lúc
+// parse. Vòng này: (1) census mọi hàm chứa undo/recall/revoke trên các
+// lớp TableItem/Entity/Message thuộc image Zalo; (2) thử ép các
+// getter BOOL 0-tham-số tên chứa "undo" về NO khi chống thu hồi đang
+// bật — nếu ô tin đọc trạng thái qua một getter như vậy thì bong bóng
+// giữ được nội dung.
+static BOOL gUndoProbeDone = NO;
+static NSMutableDictionary *gUndoGetterOrigs = nil;
+
+static BOOL ZUSUndoBoolHook(__unsafe_unretained id self, SEL _cmd) {
+    NSString *key = [NSString stringWithFormat:@"%@|%@", NSStringFromClass(object_getClass(self)), NSStringFromSelector(_cmd)];
+    void *orig = [gUndoGetterOrigs[key] pointerValue];
+    BOOL r = orig ? ((BOOL (*)(__unsafe_unretained id, SEL))orig)(self, _cmd) : NO;
+    if (r && gEnabled && gAntiRecall && gLicensed) {
+        static int n = 0;
+        if (n++ < 10) ZUSLog(@"thu hồi: ép %@.%@ từ YES về NO (chống thu hồi đang bật)", NSStringFromClass(object_getClass(self)), NSStringFromSelector(_cmd));
+        return NO;
+    }
+    return r;
+}
+
+static void ZUSInstallUndoProbe(void) {
+    if (gUndoProbeDone) return;
+    gUndoProbeDone = YES;
+    if (!gUndoGetterOrigs) gUndoGetterOrigs = [NSMutableDictionary dictionary];
+    @try {
+        int logged = 0, hooked = 0;
+        unsigned cc = 0;
+        Class *classes = objc_copyClassList(&cc);
+        for (unsigned i = 0; i < cc; i++) {
+            if (!ZUSClassIsZaloImage(classes[i])) continue;
+            NSString *shortN = ZUSClassShortName(classes[i]);
+            NSString *sl0 = [shortN lowercaseString];
+            if (!([sl0 containsString:@"tableitem"] || [sl0 containsString:@"entity"] || [sl0 containsString:@"message"])) continue;
+            unsigned mc = 0;
+            Method *ml = class_copyMethodList(classes[i], &mc);
+            for (unsigned j = 0; j < mc; j++) {
+                Method m = ml[j];
+                NSString *sn = NSStringFromSelector(method_getName(m));
+                NSString *sl = [sn lowercaseString];
+                if (!([sl containsString:@"undo"] || [sl containsString:@"recall"] || [sl containsString:@"revoke"])) continue;
+                if (logged < 120) { ZUSLog(@"thu hồi: ứng viên %@.%@ enc=%s", shortN, sn, method_getTypeEncoding(m)); logged++; }
+                int argc = (int)method_getNumberOfArguments(m) - 2;
+                const char *enc = method_getTypeEncoding(m);
+                if (argc == 0 && enc && (enc[0] == 'B' || enc[0] == 'c') && [sl containsString:@"undo"] && hooked < 6) {
+                    NSString *key = [NSString stringWithFormat:@"%@|%@", NSStringFromClass(classes[i]), sn];
+                    if (!gUndoGetterOrigs[key]) {
+                        void *orig = NULL;
+                        MSHookMessageEx(classes[i], method_getName(m), (IMP)ZUSUndoBoolHook, (IMP *)&orig);
+                        if (orig) { gUndoGetterOrigs[key] = [NSValue valueWithPointer:orig]; hooked++; ZUSLog(@"thu hồi: đã lắp móc ép getter %@", key); }
+                    }
+                }
+            }
+            free(ml);
+        }
+        free(classes);
+        ZUSLog(@"thu hồi: dò xong đường lật trạng thái — %d ứng viên, %d móc ép getter", logged, hooked);
+    } @catch (NSException *e) { ZUSLog(@"thu hồi: lỗi dò: %@", e.name); }
+}
 
 // ----- 1.2.0: popup kích hoạt (cửa sổ riêng, luôn nằm trên bảng ZUS) -----
 @interface ZUSLicenseController : UIViewController
@@ -4479,7 +4935,7 @@ static void ZUSShowActivationPopup(void) {
         ZUSInstallAdDiscovery();
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(9 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ ZUSApplyTabHiding(); });
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(26 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ ZUSApplyTabHiding(); });
-        ZUSLog(@"ZUS 1.3.0 nạp vào Zalo (bật=%d, unseen=%d, ẩn đang nhập=%d)", gEnabled, gUnseen, gHideTyping);
+        ZUSLog(@"ZUS 1.3.1 nạp vào Zalo (bật=%d, unseen=%d, ẩn đang nhập=%d)", gEnabled, gUnseen, gHideTyping);
         {
             NSDictionary *fp0 = ZUSReadFilePrefs();
             id fe0 = fp0[ZUS_KEY_ENABLED];
@@ -4502,7 +4958,7 @@ static void ZUSShowActivationPopup(void) {
             ZUSInstallConfirmCall();
             ZUSInstallPhotoOriginal();
             ZUSInstallEmojiProbe();
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(13 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ ZUSProbeCallFlow(); });
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(13 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ ZUSProbeCallFlow(); ZUSInstallUndoProbe(); });
             ZUSInstallTabBarGesture();
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(7 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ ZUSInstallWhitelist(); ZUSInstallTabBarGesture(); ZUSInstallCallBlock(); ZUSInstallConfirmCall(); ZUSInstallPhotoOriginal(); ZUSInstallEmojiProbe(); });
         });
