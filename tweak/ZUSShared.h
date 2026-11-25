@@ -38,6 +38,16 @@
 #define ZUS_KEY_ADBLOCK   @"adBlock"
 #define ZUS_KEY_VAULT     @"recallVault"
 #define ZUS_KEY_LICENSE   @"licenseKey"
+// 1.3.0: ẩn tab dạng option, xác nhận trước khi gọi, ảnh gốc, emoji react,
+// chặn cuộc gọi theo từng đoạn chat, theo dõi thay đổi bạn bè.
+#define ZUS_KEY_HIDETABDISC @"hideTabDiscover"
+#define ZUS_KEY_HIDETABTIME @"hideTabTimeline"
+#define ZUS_KEY_CONFIRMCALL @"confirmCall"
+#define ZUS_KEY_PHOTOORIG   @"photoOriginal"
+#define ZUS_KEY_MOREEMOJI   @"moreEmoji"
+#define ZUS_KEY_CALLBLOCK   @"callBlock"
+#define ZUS_KEY_FRIENDSNAP  @"friendSnap"
+#define ZUS_KEY_FRIENDCHG   @"friendChanges"
 
 
 

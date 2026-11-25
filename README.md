@@ -1,4 +1,4 @@
-# ZUS 1.2.2 (gói com.anhdang.zalounseen)
+# ZUS 1.3.0 (gói com.anhdang.zalounseen)
 
 Tweak chích vào Zalo trên máy đã jailbreak: đọc tin nhắn mà bên kia không thấy
 "đã xem" — đoạn chat vẫn giữ chữ đậm như chưa đọc — kèm tắt "đang nhập...",
@@ -30,6 +30,21 @@ chặn "đã nhận", chống thu hồi, ẩn đã xem Story và bộ công cụ
 - Trong Zalo: **ấn giữ thanh tab dưới đáy** (bất kỳ tab nào, ~0,5 giây) mở
   bảng công tắc + mục Danh bạ & hồ sơ + xem trạng thái dò; nút tròn **ZUS**
   ở màn hình chat vẫn còn làm lối vào dự phòng. (1.1.1)
+- **1.3.0 — vòng tính năng lớn (15 món anh chốt)**: bảng ZUS giao diện
+  mới (thẻ bo góc InsetGrouped, icon cho 4 tab, mục Tổng quan ở đầu tab
+  Chặn); lọc nhiễu kho thu hồi (chỉ cất từ ô tin + chống cất trùng —
+  bản 1.1.7 từng cất 1.255 mục rác); theo dõi thay đổi bạn bè qua mỗi
+  lần sao lưu danh bạ; sao lưu tin nhắn + lịch sử cuộc gọi (đọc kho dữ
+  liệu của Zalo ở chế độ chỉ-đọc trên bản sao) và nút Backup toàn bộ
+  dữ liệu; ẩn tab Khám phá / Nhật ký dạng công tắc riêng (mặc định
+  KHÔNG ẩn); xác nhận trước khi gọi; lưu ảnh đại diện / ảnh bìa của
+  đoạn chat; chặn quảng cáo vòng 2 (móc delegate/dataSource thật của
+  danh sách chat, thu chiều cao ô quảng cáo về 0); chặn cuộc gọi theo
+  từng người — 3 trạng thái Tắt / Im lặng (bên kia vẫn nghe đổ chuông,
+  máy mình không hiện) / Máy bận; ấn-giữ tải media ở màn hình Nhật ký;
+  gửi ảnh chất lượng gốc, thêm emoji react và cảnh báo link ở mức
+  dò + thử (mọi điểm dò đều ghi ZUS.log chi tiết để chốt tiếp theo log
+  máy thật). 45 cửa chặn cốt lõi giữ nguyên từng dòng như 1.2.2.
 - **1.2.2 — sửa lỗi key hợp lệ bị báo "chưa đúng"**: hàm kiểm tra
   của iOS (SecKeyVerifySignature, thuật toán X962) đòi chữ ký ở dạng
   DER/X9.62 trong khi key lưu dạng raw r||s — 1.2.0–1.2.1 đưa thẳng
