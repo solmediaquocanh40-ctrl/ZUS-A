@@ -1,4 +1,4 @@
-// ZUS 1.3.2 — đọc tin nhắn Zalo mà bên kia không thấy "đã xem", tắt "đang nhập...".
+// ZUS 1.3.3 — đọc tin nhắn Zalo mà bên kia không thấy "đã xem", tắt "đang nhập...".
 //
 // SỬA GỐC VỤ VĂNG CỦA 1.0.4 (đã chứng minh ở mức lệnh máy từ file .ips và đúng
 // file .deb đã cài): hàm thay thế chung ZUSGenericHook khai tham số kiểu `id`,
@@ -2218,7 +2218,7 @@ static NSString *ZUSExportProfile(void) {
     NSMutableDictionary *prof = [NSMutableDictionary dictionary];
     for (NSString *k in ZUSAllPrefKeys()) prof[k] = @(ZUSReadBool(k, NO));
     prof[@"_app"] = @"ZUS";
-    prof[@"_version"] = @"1.3.2";
+    prof[@"_version"] = @"1.3.3";
     NSData *json = [NSJSONSerialization dataWithJSONObject:prof options:NSJSONWritingPrettyPrinted error:nil];
     NSString *path = [ZUSDocsPath() stringByAppendingPathComponent:@"ZUS-Profile.json"];
     return [json writeToFile:path atomically:YES] ? path : nil;
@@ -2590,7 +2590,7 @@ static void ZUSSaveAvatarCover(UIViewController *fromVC);
         }
         if (!jrows.count) [jrows addObject:@{@"kind": @"info", @"title": @"Hôm nay chưa ghi được lần chặn nào theo đoạn chat (cần trích được mã đoạn chat)."}];
         [secs addObject:@{@"header": @"Nhật ký chặn hôm nay — theo đoạn chat", @"rows": jrows}];
-        [secs addObject:@{@"header": @"", @"footer": @"ZUS 1.3.2 • Thay đổi ăn ngay, không cần mở lại Zalo.", @"rows": @[
+        [secs addObject:@{@"header": @"", @"footer": @"ZUS 1.3.3 • Thay đổi ăn ngay, không cần mở lại Zalo.", @"rows": @[
             @{@"kind": @"switch", @"title": @"Ghi log gỡ lỗi", @"key": ZUS_KEY_DEBUG, @"def": @YES},
         ]}];
     }
@@ -3100,6 +3100,52 @@ static NSDictionary *ZUSExtractMediaInfo(__unsafe_unretained id model) {
 
 static void ZUSPromptUnlock(UIViewController *vc, UIView *veil);
 
+// ----- 1.3.3: tìm cửa sổ chính + thanh tab (dùng chung) -----
+// Log 1.3.2 chốt: recognizer gắn trên UITabBar không bao giờ cháy —
+// cái chạm không tới được thanh thật (Zalo phủ lớp riêng lên trên).
+// Từ 1.3.3: gắn thêm "tai nghe" ấn-giữ lên các lớp BAO NGOÀI thanh tab
+// (view cha của thanh + cửa sổ chính), lọc theo vị trí chạm.
+static UIWindow *ZUSKeyWindow(void) {
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *w in ((UIWindowScene *)scene).windows) if (w.isKeyWindow) return w;
+    }
+    return nil;
+}
+
+static UITabBar *ZUSFindTabBar(UIWindow *win, NSString **howOut) {
+    if (howOut) *howOut = nil;
+    if (!win) return nil;
+    UIViewController *root = win.rootViewController;
+    if ([root isKindOfClass:[UITabBarController class]]) {
+        if (howOut) *howOut = @"UITabBarController gốc";
+        return ((UITabBarController *)root).tabBar;
+    }
+    NSMutableArray *stack = [NSMutableArray arrayWithObject:win];
+    while (stack.count) {
+        UIView *v = stack.lastObject;
+        [stack removeLastObject];
+        if ([v isKindOfClass:[UITabBar class]]) { if (howOut) *howOut = @"quét cây view"; return (UITabBar *)v; }
+        for (UIView *sub in v.subviews) [stack addObject:sub];
+    }
+    return nil;
+}
+
+// Hình chữ nhật vùng thanh tab quy về hệ toạ độ của `view` (nới thêm
+// vài điểm cho dễ trúng). Không đo được khung thanh thật thì dự phòng
+// bằng dải 64pt dưới đáy của chính view.
+static CGRect ZUSTabBarRectInView(UIView *view) {
+    if (!view) return CGRectZero;
+    UIWindow *win = ZUSKeyWindow();
+    UITabBar *bar = ZUSFindTabBar(win, nil);
+    if (bar && bar.window && view.window && bar.window == view.window) {
+        CGRect r = [bar convertRect:bar.bounds toView:view];
+        if (r.size.width > 10 && r.size.height > 10) return CGRectInset(r, -6, -12);
+    }
+    CGRect b = view.bounds;
+    return CGRectMake(0, b.size.height - 64, b.size.width, 64);
+}
+
 // 1.3.2: trình bày bảng ZUS qua MỘT đường chung. Log 1.3.1: ấn-giữ đã
 // gắn mà bảng không hiện, handler cũ không ghi log nên không biết tịt
 // ở bước nào. Từ bản này mọi bước đều ghi log, và nếu VC tìm theo
@@ -3116,7 +3162,16 @@ static void ZUSPresentPanel(UIViewController *vc, NSString *via) {
             }
         }
         if (!host) { ZUSLog(@"bảng ZUS: %@ — KHÔNG tìm được màn hình nào để hiện bảng", via); return; }
-        while (host.presentedViewController) host = host.presentedViewController;
+        // 1.3.3: nhiều tai nghe ấn-giữ có thể cùng cháy cho một lần ấn —
+        // bảng đang mở sẵn thì bỏ qua lần gọi trùng.
+        UIViewController *walk = host;
+        for (;;) {
+            UIViewController *cand = [walk isKindOfClass:[UINavigationController class]] ? ((UINavigationController *)walk).viewControllers.firstObject : walk;
+            if ([cand isKindOfClass:[ZUSSettingsController class]]) { ZUSLog(@"bảng ZUS: %@ — bảng đang mở sẵn, bỏ qua lần gọi trùng", via); return; }
+            if (!walk.presentedViewController) break;
+            walk = walk.presentedViewController;
+        }
+        host = walk;
         ZUSSettingsController *panel = [[ZUSSettingsController alloc] init];
         UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:panel];
         [host presentViewController:nav animated:YES completion:nil];
@@ -3124,9 +3179,10 @@ static void ZUSPresentPanel(UIViewController *vc, NSString *via) {
     } @catch (NSException *e) { ZUSLog(@"bảng ZUS: %@ — lỗi hiện bảng: %@", via, e.name); }
 }
 
-@interface ZUSInAppHandler : NSObject
+@interface ZUSInAppHandler : NSObject <UIGestureRecognizerDelegate>
 - (void)zu_openSettings:(id)sender;
 - (void)zu_openSettingsFromGesture:(UILongPressGestureRecognizer *)g;
+- (void)zu_openSettingsFromParentGesture:(UILongPressGestureRecognizer *)g;
 - (void)zu_unlockTap:(UITapGestureRecognizer *)g;
 - (void)zu_mediaLongPress:(UILongPressGestureRecognizer *)g;
 @end
@@ -3164,6 +3220,38 @@ static void ZUSPresentPanel(UIViewController *vc, NSString *via) {
     if (!vc) ZUSLog(@"ấn-giữ tab: không tìm thấy VC theo responder, sẽ dùng đường dự phòng");
     else ZUSLog(@"ấn-giữ tab: VC theo responder là %@", NSStringFromClass([vc class]));
     ZUSPresentPanel(vc, @"ấn-giữ tab");
+}
+
+// 1.3.3: đường ấn-giữ từ các lớp BAO NGOÀI thanh tab (view cha / cửa sổ
+// chính). Delegate đã lọc sẵn: chỉ chạm trong vùng thanh tab mới tới
+// đây. Không dò VC theo responder (từ cửa sổ đi không tới VC) — để
+// ZUSPresentPanel tự dự phòng qua VC trên cùng.
+- (void)zu_openSettingsFromParentGesture:(UILongPressGestureRecognizer *)g {
+    if (g.state != UIGestureRecognizerStateBegan) return;
+    ZUSLog(@"ấn-giữ tab: đã nhận ấn giữ trên lớp ngoài %@ — bắt đầu mở bảng", NSStringFromClass([g.view class]));
+    ZUSLoadPrefs();
+    if (!gLongPressTab) { ZUSLog(@"ấn-giữ tab: công tắc ấn-giữ đang TẮT trong cài đặt — bỏ qua"); return; }
+    UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+    [fb impactOccurred];
+    ZUSPresentPanel(nil, @"ấn-giữ tab (lớp ngoài)");
+}
+
+// 1.3.3: delegate của các tai nghe lớp ngoài — chỉ nhận chạm nằm trong
+// vùng thanh tab dưới đáy; vùng khác của màn hình thì không nhận diện,
+// để ấn-giữ đọc tin nhắn / xem ảnh không bị ảnh hưởng.
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gr shouldReceiveTouch:(UITouch *)touch {
+    @try {
+        UIView *host = gr.view;
+        if (!host) return NO;
+        CGRect barRect = ZUSTabBarRectInView(host);
+        if (CGRectIsEmpty(barRect)) return NO;
+        CGPoint pt = [touch locationInView:host];
+        return CGRectContainsPoint(barRect, pt);
+    } @catch (NSException *e) { return NO; }
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    return YES; // không giành chạm với recognizer của Zalo
 }
 
 - (void)zu_unlockTap:(UITapGestureRecognizer *)g {
@@ -3467,32 +3555,14 @@ static void ZUSInstallInAppButton(void) {
 static BOOL gTabGestureInstalled = NO;
 static void ZUSInstallTabBarGesture(void) {
     if (gTabGestureInstalled) return;
-    if (!gLongPressTab) return; // 1.1.2: không còn cổng công tắc tổng — ấn giữ là lối vào, phải gắn cả khi tweak đang tắt
+    if (!gLongPressTab) return; // công tắc ấn-giữ tắt thì không gắn gì cả
     @try {
-        UIWindow *win = nil;
-        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-            for (UIWindow *w in ((UIWindowScene *)scene).windows) if (w.isKeyWindow) { win = w; break; }
-            if (win) break;
-        }
+        UIWindow *win = ZUSKeyWindow();
         if (!win) return; // giao diện chưa lên — lần mở chat / hẹn giờ sau sẽ gắn tiếp
-        UITabBar *tabBar = nil;
         NSString *how = nil;
-        UIViewController *root = win.rootViewController;
-        if ([root isKindOfClass:[UITabBarController class]]) {
-            tabBar = ((UITabBarController *)root).tabBar;
-            how = @"UITabBarController gốc";
-        }
+        UITabBar *tabBar = ZUSFindTabBar(win, &how);
         if (!tabBar) {
-            NSMutableArray *stack = [NSMutableArray arrayWithObject:win];
-            while (stack.count) {
-                UIView *v = stack.lastObject;
-                [stack removeLastObject];
-                if ([v isKindOfClass:[UITabBar class]]) { tabBar = (UITabBar *)v; how = @"quét cây view"; break; }
-                for (UIView *sub in v.subviews) [stack addObject:sub];
-            }
-        }
-        if (!tabBar) {
+            UIViewController *root = win.rootViewController;
             NSMutableArray *names = [NSMutableArray array];
             if (root.view) for (UIView *sub in root.view.subviews)
                 [names addObject:[NSString stringWithFormat:@"%@(y=%.0f,h=%.0f)", NSStringFromClass([sub class]), sub.frame.origin.y, sub.frame.size.height]];
@@ -3504,8 +3574,23 @@ static void ZUSInstallTabBarGesture(void) {
         lp.minimumPressDuration = 0.5;
         lp.cancelsTouchesInView = YES; // ấn giữ ăn luôn cái chạm — không nhảy tab
         [tabBar addGestureRecognizer:lp];
-        gTabGestureInstalled = YES;
         ZUSLog(@"đã gắn ấn-giữ mở bảng ZUS vào thanh tab (%@, lớp %@)", how, NSStringFromClass([tabBar class]));
+        // 1.3.3: gắn thêm tai nghe lên các lớp bao ngoài thanh tab —
+        // log 1.3.2 cho thấy chạm không xuống được thanh thật (bị lớp
+        // giao diện riêng của Zalo phủ lên). Tai nghe lớp ngoài chỉ
+        // NGHE (không ăn chạm), delegate lọc đúng vùng thanh tab.
+        NSMutableArray *hosts = [NSMutableArray array];
+        if (tabBar.superview) [hosts addObject:tabBar.superview];
+        if (![hosts containsObject:win]) [hosts addObject:win];
+        for (UIView *host in hosts) {
+            UILongPressGestureRecognizer *lp2 = [[UILongPressGestureRecognizer alloc] initWithTarget:gInAppHandler action:@selector(zu_openSettingsFromParentGesture:)];
+            lp2.minimumPressDuration = 0.5;
+            lp2.cancelsTouchesInView = NO;
+            lp2.delegate = gInAppHandler;
+            [host addGestureRecognizer:lp2];
+            ZUSLog(@"ấn-giữ tab: đã gắn thêm tai nghe ấn-giữ lên lớp ngoài %@ (gốc %@)", NSStringFromClass([host class]), NSStringFromClass([tabBar class]));
+        }
+        gTabGestureInstalled = YES;
     } @catch (NSException *e) {
         ZUSLog(@"lỗi khi gắn ấn-giữ thanh tab: %@", e.name);
     }
@@ -5024,7 +5109,7 @@ static void ZUSShowActivationPopup(void) {
         ZUSInstallAdDiscovery();
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(9 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ ZUSApplyTabHiding(); });
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(26 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ ZUSApplyTabHiding(); });
-        ZUSLog(@"ZUS 1.3.2 nạp vào Zalo (bật=%d, unseen=%d, ẩn đang nhập=%d)", gEnabled, gUnseen, gHideTyping);
+        ZUSLog(@"ZUS 1.3.3 nạp vào Zalo (bật=%d, unseen=%d, ẩn đang nhập=%d)", gEnabled, gUnseen, gHideTyping);
         {
             NSDictionary *fp0 = ZUSReadFilePrefs();
             id fe0 = fp0[ZUS_KEY_ENABLED];
