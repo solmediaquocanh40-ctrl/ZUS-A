@@ -4146,12 +4146,14 @@ static void ZUSInstallConfirmCall(void) {
                 BOOL ok = [e hasPrefix:@"v"] && (argc == 0 || (argc == 1 && [e containsString:@"@"]));
                 BOOL is4 = NO;
                 if (!ok && argc == 4 && [e hasPrefix:@"v"]) {
-                    char t0[8] = {0}, t1[8] = {0}, t2[8] = {0}, t3[8] = {0};
-                    if (method_getArgumentTypeAtIndex(m, 2, t0, sizeof(t0)) && method_getArgumentTypeAtIndex(m, 3, t1, sizeof(t1)) &&
-                        method_getArgumentTypeAtIndex(m, 4, t2, sizeof(t2)) && method_getArgumentTypeAtIndex(m, 5, t3, sizeof(t3))) {
-                        is4 = (t0[0] == '@') && (t1[0] == 'q' || t1[0] == 'Q' || t1[0] == 'l' || t1[0] == 'L') &&
-                              (t2[0] == 'q' || t2[0] == 'Q' || t2[0] == 'l' || t2[0] == 'L') && (t3[0] == '@');
-                    }
+                    char *c0 = method_copyArgumentType(m, 2);
+                    char *c1 = method_copyArgumentType(m, 3);
+                    char *c2 = method_copyArgumentType(m, 4);
+                    char *c3 = method_copyArgumentType(m, 5);
+                    is4 = c0 && c1 && c2 && c3 && c0[0] == '@' &&
+                          (c1[0] == 'q' || c1[0] == 'Q' || c1[0] == 'l' || c1[0] == 'L') &&
+                          (c2[0] == 'q' || c2[0] == 'Q' || c2[0] == 'l' || c2[0] == 'L') && c3[0] == '@';
+                    free(c0); free(c1); free(c2); free(c3);
                     ok = is4;
                 }
                 ZUSLog(@"xác nhận gọi: ứng viên %@.%@ enc=%@ — %@", cn, sn, e, ok ? @"SẼ LẮP" : @"bỏ qua (chữ ký không an toàn)");
@@ -4551,8 +4553,9 @@ static void ZUSAdHookScrollsIn(UIView *root, NSString *where) {
         if (!seenScrolls) seenScrolls = [NSMutableSet set];
         for (UIView *sv in scrolls) {
             BOOL isTable = [sv isKindOfClass:[UITableView class]];
-            id del = isTable ? ((UITableView *)sv).delegate : ((UICollectionView *)sv).delegate;
-            id ds = isTable ? ((UITableView *)sv).dataSource : ((UICollectionView *)sv).dataSource;
+            id del = nil, ds = nil;
+            if (isTable) { del = ((UITableView *)sv).delegate; ds = ((UITableView *)sv).dataSource; }
+            else { del = ((UICollectionView *)sv).delegate; ds = ((UICollectionView *)sv).dataSource; }
             NSString *triple = [NSString stringWithFormat:@"%@|%@|del:%@|ds:%@", NSStringFromClass([sv class]), where,
                                 del ? NSStringFromClass([del class]) : @"-", ds ? NSStringFromClass([ds class]) : @"-"];
             if (![seenScrolls containsObject:triple]) {
