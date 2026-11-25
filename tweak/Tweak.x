@@ -1,4 +1,4 @@
-// ZUS 1.3.1 — đọc tin nhắn Zalo mà bên kia không thấy "đã xem", tắt "đang nhập...".
+// ZUS 1.3.2 — đọc tin nhắn Zalo mà bên kia không thấy "đã xem", tắt "đang nhập...".
 //
 // SỬA GỐC VỤ VĂNG CỦA 1.0.4 (đã chứng minh ở mức lệnh máy từ file .ips và đúng
 // file .deb đã cài): hàm thay thế chung ZUSGenericHook khai tham số kiểu `id`,
@@ -207,6 +207,7 @@ static void ZUSDismissActivationPopup(void);
 static NSString *ZUSDeviceCode(void);
 static NSString *ZUSReadString(NSString *key);
 static void ZUSApplyTabHiding(void);
+static UIViewController *ZUSTopVC(void);
 static NSDictionary *gPerChat = nil;
 static NSDictionary *gLockedChats = nil;
 static NSMutableDictionary *gJournal = nil;
@@ -2217,7 +2218,7 @@ static NSString *ZUSExportProfile(void) {
     NSMutableDictionary *prof = [NSMutableDictionary dictionary];
     for (NSString *k in ZUSAllPrefKeys()) prof[k] = @(ZUSReadBool(k, NO));
     prof[@"_app"] = @"ZUS";
-    prof[@"_version"] = @"1.3.1";
+    prof[@"_version"] = @"1.3.2";
     NSData *json = [NSJSONSerialization dataWithJSONObject:prof options:NSJSONWritingPrettyPrinted error:nil];
     NSString *path = [ZUSDocsPath() stringByAppendingPathComponent:@"ZUS-Profile.json"];
     return [json writeToFile:path atomically:YES] ? path : nil;
@@ -2366,6 +2367,7 @@ static void ZUSSaveAvatarCover(UIViewController *fromVC);
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+    ZUSLog(@"bảng ZUS: đã nạp giao diện bảng (viewDidLoad) — bảng đang hiện");
     ZUSLoadPrefs();
     self.title = @"ZUS";
     self.zusTheme = ZUSTheme();
@@ -2588,7 +2590,7 @@ static void ZUSSaveAvatarCover(UIViewController *fromVC);
         }
         if (!jrows.count) [jrows addObject:@{@"kind": @"info", @"title": @"Hôm nay chưa ghi được lần chặn nào theo đoạn chat (cần trích được mã đoạn chat)."}];
         [secs addObject:@{@"header": @"Nhật ký chặn hôm nay — theo đoạn chat", @"rows": jrows}];
-        [secs addObject:@{@"header": @"", @"footer": @"ZUS 1.3.1 • Thay đổi ăn ngay, không cần mở lại Zalo.", @"rows": @[
+        [secs addObject:@{@"header": @"", @"footer": @"ZUS 1.3.2 • Thay đổi ăn ngay, không cần mở lại Zalo.", @"rows": @[
             @{@"kind": @"switch", @"title": @"Ghi log gỡ lỗi", @"key": ZUS_KEY_DEBUG, @"def": @YES},
         ]}];
     }
@@ -3098,6 +3100,30 @@ static NSDictionary *ZUSExtractMediaInfo(__unsafe_unretained id model) {
 
 static void ZUSPromptUnlock(UIViewController *vc, UIView *veil);
 
+// 1.3.2: trình bày bảng ZUS qua MỘT đường chung. Log 1.3.1: ấn-giữ đã
+// gắn mà bảng không hiện, handler cũ không ghi log nên không biết tịt
+// ở bước nào. Từ bản này mọi bước đều ghi log, và nếu VC tìm theo
+// responder không dùng được (không thuộc cửa sổ nào) thì dự phòng qua
+// VC trên cùng của cửa sổ chính.
+static void ZUSPresentPanel(UIViewController *vc, NSString *via) {
+    @try {
+        UIViewController *host = vc;
+        if (!host || !host.view.window) {
+            UIViewController *top = ZUSTopVC();
+            if (top) {
+                ZUSLog(@"bảng ZUS: %@ — VC theo responder không dùng được, dự phòng qua VC trên cùng (%@)", via, NSStringFromClass([top class]));
+                host = top;
+            }
+        }
+        if (!host) { ZUSLog(@"bảng ZUS: %@ — KHÔNG tìm được màn hình nào để hiện bảng", via); return; }
+        while (host.presentedViewController) host = host.presentedViewController;
+        ZUSSettingsController *panel = [[ZUSSettingsController alloc] init];
+        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:panel];
+        [host presentViewController:nav animated:YES completion:nil];
+        ZUSLog(@"bảng ZUS: %@ — đã gọi hiện bảng từ %@", via, NSStringFromClass([host class]));
+    } @catch (NSException *e) { ZUSLog(@"bảng ZUS: %@ — lỗi hiện bảng: %@", via, e.name); }
+}
+
 @interface ZUSInAppHandler : NSObject
 - (void)zu_openSettings:(id)sender;
 - (void)zu_openSettingsFromGesture:(UILongPressGestureRecognizer *)g;
@@ -3114,11 +3140,8 @@ static void ZUSPromptUnlock(UIViewController *vc, UIView *veil);
         if ([r isKindOfClass:[UIViewController class]]) { vc = (UIViewController *)r; break; }
         r = [r nextResponder];
     }
-    if (!vc) return;
-    while (vc.presentedViewController) vc = vc.presentedViewController;
-    ZUSSettingsController *panel = [[ZUSSettingsController alloc] init];
-    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:panel];
-    [vc presentViewController:nav animated:YES completion:nil];
+    if (!vc) ZUSLog(@"bảng ZUS: nút trong chat — không tìm thấy VC theo responder, sẽ dùng đường dự phòng");
+    ZUSPresentPanel(vc, @"nút trong chat");
 }
 
 // 1.1.1 (anh chốt): ấn giữ trên thanh tab dưới đáy Zalo cũng mở bảng này.
@@ -3127,8 +3150,9 @@ static void ZUSPromptUnlock(UIViewController *vc, UIView *veil);
 // ấn giữ không làm gì cả.
 - (void)zu_openSettingsFromGesture:(UILongPressGestureRecognizer *)g {
     if (g.state != UIGestureRecognizerStateBegan) return;
+    ZUSLog(@"ấn-giữ tab: đã nhận ấn giữ trên %@ — bắt đầu mở bảng", NSStringFromClass([g.view class]));
     ZUSLoadPrefs();
-    if (!gLongPressTab) return;
+    if (!gLongPressTab) { ZUSLog(@"ấn-giữ tab: công tắc ấn-giữ đang TẮT trong cài đặt — bỏ qua"); return; }
     UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
     [fb impactOccurred];
     UIResponder *r = (UIResponder *)g.view;
@@ -3137,11 +3161,9 @@ static void ZUSPromptUnlock(UIViewController *vc, UIView *veil);
         if ([r isKindOfClass:[UIViewController class]]) { vc = (UIViewController *)r; break; }
         r = [r nextResponder];
     }
-    if (!vc) return;
-    while (vc.presentedViewController) vc = vc.presentedViewController;
-    ZUSSettingsController *panel = [[ZUSSettingsController alloc] init];
-    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:panel];
-    [vc presentViewController:nav animated:YES completion:nil];
+    if (!vc) ZUSLog(@"ấn-giữ tab: không tìm thấy VC theo responder, sẽ dùng đường dự phòng");
+    else ZUSLog(@"ấn-giữ tab: VC theo responder là %@", NSStringFromClass([vc class]));
+    ZUSPresentPanel(vc, @"ấn-giữ tab");
 }
 
 - (void)zu_unlockTap:(UITapGestureRecognizer *)g {
@@ -3969,6 +3991,52 @@ static void ZUSIncomingAlertHook(__unsafe_unretained id self, SEL _cmd, __unsafe
     if (gOrigIncomingAlert) gOrigIncomingAlert(self, _cmd, threadId, toMute, profileInfo, handler);
 }
 
+
+// ----- 1.3.2: chặn cuộc gọi qua executeActionWithItem:context: -----
+static void (*gOrigIncomingItem)(__unsafe_unretained id, SEL, __unsafe_unretained id, __unsafe_unretained id) = NULL;
+
+static void ZUSIncomingItemHook(__unsafe_unretained id self, SEL _cmd, __unsafe_unretained id item, __unsafe_unretained id context) {
+    static int probe = 0;
+    NSString *tid = nil;
+    @try {
+        NSArray *keys = @[@"threadId", @"threadID", @"conversationId", @"conversationID", @"userId", @"userID", @"uid", @"fromUserId", @"fromId", @"senderId", @"callerId", @"id"];
+        tid = ZUSStringField(item, keys);
+        if (!tid.length) tid = ZUSStringField(context, keys);
+        if (probe < 3) {
+            NSMutableArray *props = [NSMutableArray array];
+            unsigned pc = 0;
+            objc_property_t *pl = item ? class_copyPropertyList(object_getClass(item), &pc) : NULL;
+            for (unsigned i = 0; i < pc; i++) [props addObject:@(property_getName(pl[i]))];
+            free(pl);
+            NSMutableArray *cprops = [NSMutableArray array];
+            unsigned cc2 = 0;
+            objc_property_t *pl2 = context ? class_copyPropertyList(object_getClass(context), &cc2) : NULL;
+            for (unsigned i = 0; i < cc2; i++) [cprops addObject:@(property_getName(pl2[i]))];
+            free(pl2);
+            ZUSLog(@"chặn cuộc gọi: cuộc gọi đến (đường item) — item lớp %@ (thuộc tính: %@), context lớp %@ (thuộc tính: %@), mã đoạn trích được: %@",
+                   item ? NSStringFromClass(object_getClass(item)) : @"(nil)", [props componentsJoinedByString:@", "],
+                   context ? NSStringFromClass(object_getClass(context)) : @"(nil)", [cprops componentsJoinedByString:@", "],
+                   tid.length ? tid : @"(chưa trích được)");
+        }
+    } @catch (NSException *e) {}
+    if (probe < 3) probe++;
+    int mode = 0;
+    @try {
+        id v = tid.length ? gCallBlock[tid] : nil;
+        if ([v isKindOfClass:[NSNumber class]]) mode = [v intValue];
+    } @catch (NSException *e) {}
+    if (mode == 1) {
+        ZUSLog(@"chặn cuộc gọi: NUỐT cuộc gọi đến từ %@ (IM LẶNG, đường item) — máy không chuông, không hiện", tid);
+        return;
+    }
+    if (mode == 2) {
+        ZUSLog(@"chặn cuộc gọi: NUỐT cuộc gọi đến từ %@ (MÁY BẬN, đường item) — thử đường từ chối", tid);
+        ZUSTryDeclineCall(tid, self);
+        return;
+    }
+    if (gOrigIncomingItem) gOrigIncomingItem(self, _cmd, item, context);
+}
+
 static BOOL gCallBlockInstalled = NO;
 static void ZUSInstallCallBlock(void) {
     if (gCallBlockInstalled) return;
@@ -3992,6 +4060,24 @@ static void ZUSInstallCallBlock(void) {
                 for (unsigned i = 0; i < mc; i++) [names addObject:NSStringFromSelector(method_getName(ml[i]))];
                 free(ml);
                 ZUSLog(@"chặn cuộc gọi: lớp %@ (%@) — %d hàm: %@", NSStringFromClass(cls), ZUSClassIsZaloImage(cls) ? @"image Zalo" : @"image khác", mc, [names componentsJoinedByString:@", "]);
+            }
+            // 1.3.2: selector THẬT của bản Zalo này — thử trước.
+            SEL ns = sel_registerName("executeActionWithItem:context:");
+            Method nm = class_getInstanceMethod(cls, ns);
+            if (nm) {
+                NSString *e2 = [NSString stringWithUTF8String:method_getTypeEncoding(nm) ?: ""];
+                char *a0 = method_copyArgumentType(nm, 2);
+                char *a1 = method_copyArgumentType(nm, 3);
+                BOOL ok2 = [e2 hasPrefix:@"v"] && (int)method_getNumberOfArguments(nm) - 2 == 2 && a0 && a1 && a0[0] == '@' && a1[0] == '@';
+                free(a0); free(a1);
+                if (ok2) {
+                    MSHookMessageEx(cls, ns, (IMP)ZUSIncomingItemHook, (IMP *)&gOrigIncomingItem);
+                    gCallBlockInstalled = YES;
+                    dumped = YES;
+                    ZUSLog(@"chặn cuộc gọi: đã lắp móc vào %@.executeActionWithItem:context: (enc %@)", NSStringFromClass(cls), e2);
+                    return;
+                }
+                ZUSLog(@"chặn cuộc gọi: executeActionWithItem:context: chữ ký lạ (%@) trên %@ — không lắp", e2, NSStringFromClass(cls));
             }
             if (!m) continue;
             NSString *e = [NSString stringWithUTF8String:method_getTypeEncoding(m) ?: ""];
@@ -4938,7 +5024,7 @@ static void ZUSShowActivationPopup(void) {
         ZUSInstallAdDiscovery();
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(9 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ ZUSApplyTabHiding(); });
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(26 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ ZUSApplyTabHiding(); });
-        ZUSLog(@"ZUS 1.3.1 nạp vào Zalo (bật=%d, unseen=%d, ẩn đang nhập=%d)", gEnabled, gUnseen, gHideTyping);
+        ZUSLog(@"ZUS 1.3.2 nạp vào Zalo (bật=%d, unseen=%d, ẩn đang nhập=%d)", gEnabled, gUnseen, gHideTyping);
         {
             NSDictionary *fp0 = ZUSReadFilePrefs();
             id fe0 = fp0[ZUS_KEY_ENABLED];

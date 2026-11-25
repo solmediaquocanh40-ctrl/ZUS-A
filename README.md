@@ -1,4 +1,4 @@
-# ZUS 1.3.1 (gói com.anhdang.zalounseen)
+# ZUS 1.3.2 (gói com.anhdang.zalounseen)
 
 Tweak chích vào Zalo trên máy đã jailbreak: đọc tin nhắn mà bên kia không thấy
 "đã xem" — đoạn chat vẫn giữ chữ đậm như chưa đọc — kèm tắt "đang nhập...",
@@ -30,6 +30,19 @@ chặn "đã nhận", chống thu hồi, ẩn đã xem Story và bộ công cụ
 - Trong Zalo: **ấn giữ thanh tab dưới đáy** (bất kỳ tab nào, ~0,5 giây) mở
   bảng công tắc + mục Danh bạ & hồ sơ + xem trạng thái dò; nút tròn **ZUS**
   ở màn hình chat vẫn còn làm lối vào dự phòng. (1.1.1)
+- **1.3.2 — sửa đường mở bảng + chặn cuộc gọi đúng selector (theo
+  ZUS.log 1.3.1)**: (1) log 1.3.1 cho thấy ấn-giữ đã gắn thành công mà
+  bảng không hiện, trong khi handler cũ không ghi log khi chạy nên
+  không khoanh được bước tịt — bản này gom cả hai đường mở bảng (ấn-giữ
+  tab + nút trong chat) về một hàm trình bày chung: ghi log từng bước
+  (đã nhận ấn giữ → VC tìm được → đã gọi hiện bảng → bảng xác nhận đã
+  nạp giao diện), VC theo responder không dùng được thì dự phòng hiện
+  từ VC trên cùng của cửa sổ chính; (2) chặn cuộc gọi móc đúng
+  executeActionWithItem:context: — hàm duy nhất của
+  RMIncomingAlertAction theo dump của 1.3.1 (selector dài của log ứng
+  viên 1.0.3 là của lớp khác) — kèm dump cấu trúc item/context 3 lần
+  đầu để trích mã đoạn chat, chặn theo từng người bằng từ điển
+  callBlock như thiết kế cũ. 45 cửa chặn cốt lõi giữ nguyên từng dòng.
 - **1.3.1 — sửa theo ZUS.log của 1.3.0 (chỉ sửa đúng lỗi log ghi
   nhận)**: sao lưu tin nhắn đọc thẳng bảng ChatContent trong
   chat_dbs/*.db (1.3.0 chọn nhầm bảng chỉ mục tìm kiếm FTS); sao lưu
